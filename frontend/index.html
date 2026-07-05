@@ -3191,9 +3191,9 @@ async function saveData({ force = false } = {}) {
   if(window.cacheManager) cacheManager.invalidate('');
   if(localSaved) {
     ensureAuthProfileInFirestore().catch(() => {});
-    saveDataToBackend().catch(() => {});              // own SQLite backend (primary target)
+    saveDataToBackend().catch(() => {});              // own SQLite backend (local self-owned backup when running)
     if(typeof scheduleCloudSave === 'function') scheduleCloudSave();
-    else saveDataToFirestore().catch(() => {});       // Firestore (safety net during transition)
+    else saveDataToFirestore().catch(() => {});       // Firestore (primary cloud, multi-device)
     setSyncUI('synced');
   } else {
     setSyncUI('offline');
@@ -3207,10 +3207,11 @@ async function loadData() {
     // cloud data over a just-saved local state.
     let __pendWaited = 0;
     while(window.__pendingCloudSave && __pendWaited < 5000) { await new Promise(r => setTimeout(r, 100)); __pendWaited += 100; }
-    // Own backend is the primary cloud source; Firestore is the fallback during
-    // the transition off Google.
-    let loadedFromCloud = await loadDataFromBackend();
-    if(!loadedFromCloud) loadedFromCloud = await loadDataFromFirestore();
+    // Firestore is the primary cloud sync (multi-device). The local SQLite
+    // backend, when it happens to be running on this PC, is an extra self-owned
+    // backup — read only as a fallback if the cloud returned nothing.
+    let loadedFromCloud = await loadDataFromFirestore();
+    if(!loadedFromCloud) loadedFromCloud = await loadDataFromBackend();
 
     if(!loadedFromCloud) {
       const loadedSqlite = await loadFromRelationalSQLite();
@@ -8068,12 +8069,14 @@ async function backendSaveUserData(userId, dataPayload, idsPayload) {
   });
 }
 
-// ===== Own-backend cloud sync (mirrors the Firestore save/load semantics) =====
-// These wire the self-hosted SQLite backend (window.__KOSHAGAR_BACKEND_URL) into
-// saveData()/loadData(). Additive and failure-tolerant: any error falls back to
-// local + Firestore exactly like before, so a missing/unreachable backend cannot
-// break the app. Newer-wins on load prevents a stale backend read from clobbering
-// unsynced local edits.
+// ===== Own-backend LOCAL BACKUP (mirrors the Firestore save/load semantics) =====
+// Firestore stays the primary cloud (multi-device). This wires the self-hosted
+// SQLite backend (window.__KOSHAGAR_BACKEND_URL, normally http://localhost:3001)
+// as an EXTRA self-owned backup: saveData() also pushes a copy to it, and
+// loadData() reads it only as a fallback if the cloud returned nothing. Additive
+// and failure-tolerant — if the local backend isn't running (the common case on
+// phones/other devices) every call fails silently and the app is unaffected.
+// Newer-wins on load prevents a stale backup read from clobbering newer data.
 async function saveDataToBackend() {
   try {
     const uid = normalizeUserId(currentUserId);
