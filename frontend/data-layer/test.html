@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KoshAgar Data Layer — Products Test</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; max-width: 860px; }
+  h1 { font-size: 1.2rem; margin: 0 0 4px; }
+  .sub { color: #888; font-size: .85rem; margin-bottom: 16px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  button { font-size: .92rem; padding: 9px 13px; border: 0; border-radius: 8px; background: #2563eb; color: #fff; cursor: pointer; }
+  button.alt { background: #6b7280; }
+  button:disabled { opacity: .5; }
+  #log { font-family: ui-monospace, monospace; font-size: .82rem; line-height: 1.5; background: #0b1020; color: #d6e2ff; border-radius: 8px; padding: 12px; height: 360px; overflow: auto; white-space: pre-wrap; }
+  .ok { color: #6ee7b7; } .err { color: #fca5a5; } .hi { color: #fcd34d; }
+</style>
+</head>
+<body>
+  <h1>KoshAgar Data Layer — Products Test</h1>
+  <div class="sub">Proves the new on-disk, incremental engine: single-row writes + 3,000-at-once bulk, on disk (OPFS), no full rewrite. Separate from your real app data.</div>
+
+  <div class="row">
+    <button id="init">1 · Initialize</button>
+  </div>
+  <div class="row">
+    <button class="alt" data-cmd="addOne" disabled>+ 1 product (incremental)</button>
+    <button class="alt" data-cmd="bulk" disabled>+ 3,000 products (bulk)</button>
+    <button data-cmd="list" disabled>List first 20</button>
+    <button data-cmd="update" disabled>Rename first product</button>
+    <button data-cmd="count" disabled>Count</button>
+  </div>
+
+  <div id="log"></div>
+
+<script type="module">
+  import { db } from './db.js';
+  import * as products from './repositories/products.js';
+
+  const logEl = document.getElementById('log');
+  const fmt = n => Number(n).toLocaleString('en-IN');
+  const ms = m => (m < 1000 ? m.toFixed(0) + ' ms' : (m / 1000).toFixed(2) + ' s');
+  const log = (m, c) => { logEl.innerHTML += `<span class="${c||''}">[${new Date().toLocaleTimeString()}] ${m}</span>\n`; logEl.scrollTop = logEl.scrollHeight; };
+  const enable = () => document.querySelectorAll('button[data-cmd]').forEach(b => b.disabled = false);
+
+  const opfsOk = !!(navigator.storage && navigator.storage.getDirectory);
+  log(`OPFS available: ${opfsOk ? 'YES ✓' : 'NO ✗ (needs https or localhost)'}`, opfsOk ? 'ok' : 'err');
+
+  document.getElementById('init').addEventListener('click', async () => {
+    try {
+      log('Opening on-disk database…');
+      const r = await db.init();
+      log(`Ready ✓ SQLite ${r.libVersion || '(open)'}, schema v${r.version}.`, 'ok');
+      const n = await products.countProducts();
+      log(`Products currently on disk: ${fmt(n)}` + (n > 0 ? '  ← persisted from a previous run (disk works!)' : ''), n > 0 ? 'hi' : '');
+      enable();
+    } catch (e) { log('Init failed: ' + e.message, 'err'); }
+  });
+
+  const actions = {
+    async addOne() {
+      const t0 = performance.now();
+      const pid = await products.addProduct({ name: 'Test Product ' + Date.now(), category: 'General', unitId: null });
+      log(`Added 1 product (${pid}) incrementally in ${ms(performance.now() - t0)}. Total: ${fmt(await products.countProducts())}`, 'ok');
+    },
+    async bulk() {
+      const list = Array.from({ length: 3000 }, (_, i) => ({ name: `Bulk Product ${Date.now()}-${i}`, category: 'Bulk', unitId: null }));
+      log('Bulk-adding 3,000 products in one transaction…');
+      const t0 = performance.now();
+      const n = await products.addProductsBulk(list);
+      log(`✅ ${fmt(n)} products in ${ms(performance.now() - t0)} — no crash, on disk. Total now: ${fmt(await products.countProducts())}`, 'ok');
+    },
+    async list() {
+      const rows = await products.listProducts({ limit: 20 });
+      log(`First ${rows.length} products (paginated, not whole table):`, 'hi');
+      rows.slice(0, 5).forEach(r => log(`  • ${r.name}  [stock ${r.current_stock}]`));
+      if (rows.length > 5) log(`  … and ${rows.length - 5} more`);
+    },
+    async update() {
+      const [first] = await products.listProducts({ limit: 1 });
+      if (!first) { log('No products yet — add some first.', 'err'); return; }
+      const t0 = performance.now();
+      const changed = await products.updateProduct(first.id, { name: first.name + ' (renamed)' });
+      log(`Updated ONLY that 1 row in ${ms(performance.now() - t0)} (changes=${changed}). No full rewrite.`, 'ok');
+    },
+    async count() {
+      log(`Total products on disk: ${fmt(await products.countProducts())}`, 'hi');
+    }
+  };
+
+  document.querySelectorAll('button[data-cmd]').forEach(b =>
+    b.addEventListener('click', async () => {
+      document.querySelectorAll('button').forEach(x => x.disabled = true);
+      try { await actions[b.dataset.cmd](); } catch (e) { log('Error: ' + e.message, 'err'); }
+      document.querySelectorAll('button').forEach(x => x.disabled = false);
+    }));
+</script>
+</body>
+</html>
