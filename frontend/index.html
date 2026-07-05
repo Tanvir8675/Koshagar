@@ -3191,8 +3191,9 @@ async function saveData({ force = false } = {}) {
   if(window.cacheManager) cacheManager.invalidate('');
   if(localSaved) {
     ensureAuthProfileInFirestore().catch(() => {});
+    saveDataToBackend().catch(() => {});              // own SQLite backend (primary target)
     if(typeof scheduleCloudSave === 'function') scheduleCloudSave();
-    else saveDataToFirestore().catch(() => {});
+    else saveDataToFirestore().catch(() => {});       // Firestore (safety net during transition)
     setSyncUI('synced');
   } else {
     setSyncUI('offline');
@@ -3206,7 +3207,10 @@ async function loadData() {
     // cloud data over a just-saved local state.
     let __pendWaited = 0;
     while(window.__pendingCloudSave && __pendWaited < 5000) { await new Promise(r => setTimeout(r, 100)); __pendWaited += 100; }
-    let loadedFromCloud = await loadDataFromFirestore();
+    // Own backend is the primary cloud source; Firestore is the fallback during
+    // the transition off Google.
+    let loadedFromCloud = await loadDataFromBackend();
+    if(!loadedFromCloud) loadedFromCloud = await loadDataFromFirestore();
 
     if(!loadedFromCloud) {
       const loadedSqlite = await loadFromRelationalSQLite();
@@ -8011,16 +8015,27 @@ const AB_LAST_KEY = 'autoBackupLastDate';
 <script src="./config.js"></script>
 <script src="./app.js"></script>
 <script>
-async function apiRequest(path, { method = 'GET', body, headers } = {}) {
+async function apiRequest(path, { method = 'GET', body, headers, timeoutMs = 6000 } = {}) {
   const url = `${window.__KOSHAGAR_BACKEND_URL}${path}`;
-  const res = await fetch(url, {
-    method,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(headers || {})
-    },
-    body: body ? JSON.stringify(body) : undefined
-  });
+  // Hard timeout: an unreachable/hanging backend must not stall load or save
+  // (loadData awaits the backend first). On timeout the fetch aborts → throws →
+  // callers fall back to local/Firestore.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  let res;
+  try {
+    res = await fetch(url, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(headers || {})
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: ctrl.signal
+    });
+  } finally {
+    clearTimeout(timer);
+  }
   const text = await res.text();
   let data = {};
   try { data = text ? JSON.parse(text) : {}; } catch (_) { data = {}; }
@@ -8051,6 +8066,64 @@ async function backendSaveUserData(userId, dataPayload, idsPayload) {
     method: 'PUT',
     body: { data: dataPayload, ids: idsPayload }
   });
+}
+
+// ===== Own-backend cloud sync (mirrors the Firestore save/load semantics) =====
+// These wire the self-hosted SQLite backend (window.__KOSHAGAR_BACKEND_URL) into
+// saveData()/loadData(). Additive and failure-tolerant: any error falls back to
+// local + Firestore exactly like before, so a missing/unreachable backend cannot
+// break the app. Newer-wins on load prevents a stale backend read from clobbering
+// unsynced local edits.
+async function saveDataToBackend() {
+  try {
+    const uid = normalizeUserId(currentUserId);
+    if(!uid) return false;
+    const idsSnapshot = getIdsSnapshot();
+    const pinHash = (typeof userPin !== 'undefined' && userPin) ? userPin : null;
+    try {
+      await backendSaveUserData(uid, data, idsSnapshot);
+    } catch(err) {
+      // Self-provision: the backend rejects unknown users (404). Register once
+      // using the PIN hash login already resolved, then retry the save.
+      if(/not found/i.test(err && err.message) && pinHash) {
+        try {
+          await backendRegisterUser(
+            uid, pinHash,
+            (typeof viewerPin !== 'undefined' && viewerPin) ? viewerPin : '',
+            (typeof securityQuestion !== 'undefined' && securityQuestion) ? securityQuestion : '',
+            (typeof securityAnswerHash !== 'undefined' && securityAnswerHash) ? securityAnswerHash : ''
+          );
+        } catch(_) { /* 409 = already exists → fine */ }
+        await backendSaveUserData(uid, data, idsSnapshot);
+      } else {
+        throw err;
+      }
+    }
+    return true;
+  } catch(_) {
+    return false;
+  }
+}
+
+async function loadDataFromBackend() {
+  try {
+    const uid = normalizeUserId(currentUserId);
+    if(!uid) return false;
+    const res = await backendLoadUserData(uid); // { ok, data, ids, updatedAt }
+    if(!res || !res.ok || !res.data || typeof res.data !== 'object') return false;
+    // Newer-wins: only overwrite local with backend data when backend is newer
+    // (or there is no local edit yet).
+    const remoteUpdatedAt = res.updatedAt ? new Date(res.updatedAt).getTime() : 0;
+    const localTs = window.__localDataUpdatedAt || 0;
+    if(!(localTs === 0 || remoteUpdatedAt > localTs)) return false;
+    window.__lastValidDataSnapshot = (typeof data !== 'undefined') ? data : null;
+    data = res.data;
+    window.__localDataUpdatedAt = remoteUpdatedAt || Date.now();
+    if(res.ids) parseIdsSnapshot(res.ids);
+    return true;
+  } catch(_) {
+    return false;
+  }
 }
 
 if ('serviceWorker' in navigator && !window.location.pathname.includes('index_cash_reconcile_demo.html')) {

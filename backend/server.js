@@ -238,7 +238,8 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         userId,
         data: parseJsonColumn(user.data_json, defaultData()),
-        ids: parseJsonColumn(user.ids_json, {})
+        ids: parseJsonColumn(user.ids_json, {}),
+        updatedAt: user.updated_at   // lets the client do newer-wins conflict handling
       });
     } catch (error) {
       sendJson(res, 500, { ok: false, error: error.message || 'Load failed' });
