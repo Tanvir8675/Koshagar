@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KoshAgar — OPFS SQLite Scale Test</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; max-width: 820px; }
+  h1 { font-size: 1.25rem; margin: 0 0 4px; }
+  .sub { color: #888; font-size: .85rem; margin-bottom: 16px; }
+  .env { font-size: .8rem; background: rgba(128,128,128,.12); border-radius: 8px; padding: 10px 12px; margin-bottom: 16px; white-space: pre-wrap; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+  button { font-size: .95rem; padding: 10px 14px; border: 0; border-radius: 8px; background: #2563eb; color: #fff; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.alt { background: #6b7280; }
+  button.warn { background: #b91c1c; }
+  #log { font-family: ui-monospace, monospace; font-size: .82rem; line-height: 1.5; background: #0b1020; color: #d6e2ff; border-radius: 8px; padding: 12px; height: 340px; overflow: auto; white-space: pre-wrap; }
+  .ok { color: #6ee7b7; } .err { color: #fca5a5; } .hi { color: #fcd34d; }
+</style>
+</head>
+<body>
+  <h1>KoshAgar — OPFS SQLite Scale Test</h1>
+  <div class="sub">Proves the new on-disk engine holds millions of rows &amp; bulk inserts, on this device. Nothing here touches your real app data.</div>
+  <div class="env" id="env">checking environment…</div>
+
+  <div class="row">
+    <button id="btnInit">1 · Initialize engine</button>
+  </div>
+  <div class="row">
+    <button class="alt" data-n="100000" disabled>+ 1 lakh transactions</button>
+    <button class="alt" data-n="1000000" disabled>+ 10 lakh transactions</button>
+    <button class="alt" data-n="5000000" disabled>+ 50 lakh transactions</button>
+    <button class="alt" data-p="3000" disabled>+ 3,000 products (bulk)</button>
+  </div>
+  <div class="row">
+    <button data-cmd="aggregate" disabled>Run report query (SUM/GROUP BY)</button>
+    <button class="warn" data-cmd="prune" disabled>Prune old records (retention test)</button>
+    <button class="warn" data-cmd="clear" disabled>Clear all</button>
+  </div>
+
+  <div id="log"></div>
+
+<script type="module">
+  const logEl = document.getElementById('log');
+  const fmt = n => n.toLocaleString('en-IN');
+  const ms = m => (m < 1000 ? m.toFixed(0) + ' ms' : (m / 1000).toFixed(2) + ' s');
+  function log(msg, cls) {
+    const t = new Date().toLocaleTimeString();
+    logEl.innerHTML += `<span class="${cls || ''}">[${t}] ${msg}</span>\n`;
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // Environment report
+  const opfsOk = !!(navigator.storage && navigator.storage.getDirectory);
+  document.getElementById('env').textContent =
+    `Browser : ${navigator.userAgent}\n` +
+    `Device memory : ${navigator.deviceMemory ? navigator.deviceMemory + ' GB (approx)' : 'unknown'}\n` +
+    `CPU cores : ${navigator.hardwareConcurrency || '?'}\n` +
+    `OPFS available : ${opfsOk ? 'YES ✓' : 'NO ✗ (browser too old — update it)'}`;
+
+  // Worker round-trip helper
+  const worker = new Worker('./opfs-bench-worker.js', { type: 'module' });
+  let seq = 0; const pending = new Map();
+  worker.onmessage = (e) => {
+    const { id, ok, ...rest } = e.data;
+    const p = pending.get(id); if (!p) return; pending.delete(id);
+    ok ? p.resolve(rest) : p.reject(new Error(rest.error));
+  };
+  worker.onerror = (e) => log('Worker error: ' + e.message, 'err');
+  const call = (cmd, arg) => new Promise((resolve, reject) => {
+    const id = ++seq; pending.set(id, { resolve, reject });
+    worker.postMessage({ id, cmd, arg });
+  });
+
+  const actionBtns = () => document.querySelectorAll('button[data-n],button[data-p],button[data-cmd]');
+  const setBusy = (b) => document.querySelectorAll('button').forEach(x => x.disabled = b);
+
+  document.getElementById('btnInit').addEventListener('click', async (ev) => {
+    if (!opfsOk) { log('OPFS not available on this browser — cannot run.', 'err'); return; }
+    setBusy(true);
+    try {
+      log('Initializing SQLite-WASM on OPFS…');
+      const r = await call('init');
+      log(`Engine ready ✓  SQLite ${r.libVersion}. Existing rows — tx: ${fmt(r.txCount)}, products: ${fmt(r.pCount)}`, 'ok');
+      if (r.txCount > 0) log('(data persisted from a previous run — OPFS is working)', 'hi');
+      actionBtns().forEach(b => b.disabled = false);
+      ev.target.disabled = false;
+    } catch (e) { log('Init failed: ' + e.message, 'err'); }
+    setBusy(false);
+    document.getElementById('btnInit').disabled = false;
+    actionBtns().forEach(b => b.disabled = false);
+  });
+
+  async function run(fn) { setBusy(true); try { await fn(); } catch (e) { log('Error: ' + e.message, 'err'); } setBusy(false); document.querySelectorAll('button').forEach(b => b.disabled = false); }
+
+  document.querySelectorAll('button[data-n]').forEach(btn => btn.addEventListener('click', () => run(async () => {
+    const n = +btn.dataset.n;
+    log(`Inserting ${fmt(n)} transactions (one batched SQL transaction)…`);
+    const r = await call('insertTx', n);
+    log(`Inserted ${fmt(n)} in ${ms(r.ms)}  →  ${fmt(Math.round(n / (r.ms / 1000)))}/sec. Table now: ${fmt(r.total)} rows`, 'ok');
+  })));
+
+  document.querySelectorAll('button[data-p]').forEach(btn => btn.addEventListener('click', () => run(async () => {
+    const n = +btn.dataset.p;
+    log(`Bulk-inserting ${fmt(n)} products at once…`);
+    const r = await call('insertProducts', n);
+    log(`${fmt(n)} products in ${ms(r.ms)}. Products table: ${fmt(r.total)}`, 'ok');
+  })));
+
+  document.querySelector('button[data-cmd="aggregate"]').addEventListener('click', () => run(async () => {
+    log('Running report query over the whole table (indexed SUM/COUNT/GROUP BY)…');
+    const r = await call('aggregate');
+    log(`Report computed in ${ms(r.ms)} (${r.groups} day-groups). This is what a dashboard costs at current size.`, 'ok');
+    if (r.sample && r.sample.length) log('sample: ' + JSON.stringify(r.sample[0]), 'hi');
+  }));
+
+  document.querySelector('button[data-cmd="prune"]').addEventListener('click', () => run(async () => {
+    log('Retention test: deleting all transactions dated before 2023-01-01…');
+    const r = await call('prune', '2023-01-01');
+    log(`Pruned ${fmt(r.deleted)} old rows in ${ms(r.ms)}. Remaining: ${fmt(r.total)}`, 'ok');
+  }));
+
+  document.querySelector('button[data-cmd="clear"]').addEventListener('click', () => run(async () => {
+    await call('clear');
+    log('Cleared benchmark tables.', 'hi');
+  }));
+</script>
+</body>
+</html>
