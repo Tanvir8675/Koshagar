@@ -4,7 +4,7 @@
 // after the main script. Runtime-only (entry form), so load order is safe. The
 // money/stock mutators (saveEntry, submitBillEntry, editTx, deleteTx) stay in
 // index.html. Depends on globals: round2, clamp, entryBillItems,
-// entryBillDiscount, entryType, nextBillId, nextReturnGroupId, data, toast,
+// entryBillDiscount, entryBillExtraCost, entryType, nextBillId, nextReturnGroupId, data, toast,
 // todayStr, quoteFifoSaleUnitCost, getFifoLots, getProd, fmt, getStock,
 // cdSetValue, cdClear, storageSet/Get/Remove, ENTRY_DRAFT_KEY, __entryRestoring,
 // __entryDraftSaveTimer, updateCreditPreview, updateSupplierPayPreview.
@@ -13,7 +13,13 @@ function buildEntryBillMetrics(items, discount, type) {
   const list = Array.isArray(items) ? items : [];
   const mode = type === 'sale' ? 'sale' : (type === 'purchase' ? 'purchase' : 'other');
   const grossTotal = round2(list.reduce((s, it) => s + (Number(it.total) || 0), 0));
-  const costTotal = round2(list.reduce((s, it) => s + round2((Number(it.cost) || 0) * (Number(it.qty) || 0)), 0));
+  const extraCostTotal = mode === 'purchase'
+    ? round2(list.reduce((s, it) => s + (Number(it.lineExtraCost) || 0), 0) + (Number(entryBillExtraCost) || 0))
+    : 0;
+  const costTotal = round2(list.reduce((s, it) => {
+    const exact = Number(it.costTotal);
+    return s + (Number.isFinite(exact) && exact >= 0 ? round2(exact) : round2((Number(it.cost) || 0) * (Number(it.qty) || 0)));
+  }, 0));
   let discountAmount = 0;
   if(mode === 'sale' && grossTotal > 0) {
     const raw = round2(Number(discount?.value) || 0);
@@ -27,7 +33,7 @@ function buildEntryBillMetrics(items, discount, type) {
   }
   const netTotal = round2(Math.max(0, grossTotal - discountAmount));
   const profit = mode === 'sale' ? round2(netTotal - costTotal) : 0;
-  return { grossTotal, discountAmount, netTotal, costTotal, profit };
+  return { grossTotal, extraCostTotal, discountAmount, netTotal, costTotal, profit };
 }
 function getEntryBillTotal() {
   return buildEntryBillMetrics(entryBillItems, entryBillDiscount, entryType).grossTotal;
@@ -36,6 +42,15 @@ function getEntryBillDiscountAmount() {
   return buildEntryBillMetrics(entryBillItems, entryBillDiscount, entryType).discountAmount;
 }
 function getEntryBillNetTotal() {
+  return buildEntryBillMetrics(entryBillItems, entryBillDiscount, entryType).netTotal;
+}
+function getEntryBillPayableTotal() {
+  const metrics = buildEntryBillMetrics(entryBillItems, entryBillDiscount, entryType);
+  return entryType === 'purchase'
+    ? round2(metrics.netTotal + metrics.extraCostTotal)
+    : metrics.netTotal;
+}
+function getEntryBillCreditBaseTotal() {
   return buildEntryBillMetrics(entryBillItems, entryBillDiscount, entryType).netTotal;
 }
 function getEntryBillCostTotal() {
@@ -64,11 +79,15 @@ function makeReturnGroupId(returnType, linkedBaseTx, entryDateStr) {
 }
 function getEntryWorkingTotal() {
   if((entryType === 'sale' || entryType === 'purchase') && entryBillItems.length > 0) {
-    return typeof getEntryBillNetTotal === 'function' ? getEntryBillNetTotal() : getEntryBillTotal();
+    // Credit/due preview uses the party bill amount only. Purchase extra costing
+    // is a separate cash-out, not supplier payable.
+    return typeof getEntryBillCreditBaseTotal === 'function' ? getEntryBillCreditBaseTotal() : getEntryBillNetTotal();
   }
   const qty = parseFloat(document.getElementById('eQty')?.value) || 0;
   const price = parseFloat(document.getElementById('ePrice')?.value) || 0;
-  return round2(qty * price);
+  return (entryType === 'purchase' && typeof entryPriceMode !== 'undefined' && entryPriceMode === 'total')
+    ? round2(price)
+    : round2(qty * price);
 }
 function readCurrentEntryLine(showToast=true) {
   const productId = document.getElementById('eProduct').value;
@@ -107,11 +126,14 @@ function readCurrentEntryLine(showToast=true) {
     ? round2(price)
     : round2(entryQty * price);
   const pricePerBase = qty > 0 ? Number((total / qty).toFixed(6)) : price;
-  const saleDate = document.getElementById('eDate')?.value || todayStr();
+  const saleDate = readAppDateValue('eDate');
   const reservedQty = entryType === 'sale'
     ? round2(entryBillItems.filter(it => it.productId === productId).reduce((s, it) => s + (Number(it.qty) || 0), 0))
     : 0;
-  const fifoCost = quoteFifoSaleUnitCost(productId, qty, saleDate, reservedQty);
+  const fifoQuote = entryType === 'sale' && typeof quoteFifoSaleCost === 'function'
+    ? quoteFifoSaleCost(productId, qty, saleDate, reservedQty)
+    : null;
+  const fifoCost = fifoQuote ? (fifoQuote.unitCost || 0) : quoteFifoSaleUnitCost(productId, qty, saleDate, reservedQty);
   if(entryType === 'sale' && getFifoLots(productId).length === 0) {
     if(showToast) toast('⚠️ No purchase history. Add a purchase first');
     return null;
@@ -121,6 +143,7 @@ function readCurrentEntryLine(showToast=true) {
     qty,                 // base (stock) units
     price: pricePerBase, // per base unit
     cost: entryType === 'sale' ? fifoCost : pricePerBase,
+    costTotal: entryType === 'sale' ? round2(fifoQuote?.totalCost || round2(qty * fifoCost)) : undefined,
     supplier: (document.getElementById('eSupplier').value || '').trim(),
     entryUnit: conv.unit,
     entryFactor: Number(conv.factor) || 1,
@@ -129,14 +152,15 @@ function readCurrentEntryLine(showToast=true) {
     setsBase: !!conv.setsBase          // first purchase → this unit defines product.unit
   };
   line.total = total;
-  // Distributor-discount / landed costing (purchase bill lines). netUnitCost is
-  // the per-base net cost; list/discount are reference; landed (per base) overrides
-  // valuation/COGS. Captured from the entry form at add-to-bill time.
+  // Distributor-discount / extra costing (purchase bill lines). netUnitCost is
+  // the per-base net cost; list/discount are reference; landedUnitCost is net +
+  // extra costing distributed per base unit for valuation/COGS.
   if(entryType === 'purchase' && typeof readPurchaseCostingFields === 'function') {
     const c = readPurchaseCostingFields(line.entryFactor);
     line.netUnitCost = pricePerBase;
     if(c.listUnitPrice != null) { line.listUnitPrice = c.listUnitPrice; line.discountPercent = c.discountPercent; line.discountAmount = c.discountAmount; }
     if(c.landedUnitCost != null) line.landedUnitCost = c.landedUnitCost;
+    if(c.lineExtraCost != null) line.lineExtraCost = c.lineExtraCost;
   }
   return line;
 }
@@ -170,7 +194,8 @@ function saveEntryDraft() {
     const hasInput = !!(inputs.product || inputs.qty || inputs.price || inputs.supplier ||
       inputs.saleCustomer || inputs.saleCustomerPhone || inputs.returnReason);
     const hasDiscount = !!(entryBillDiscount && Number(entryBillDiscount.value) > 0);
-    if(!hasItems && !hasInput && !hasDiscount) {
+    const hasBillExtraCost = !!(Number(entryBillExtraCost) > 0);
+    if(!hasItems && !hasInput && !hasDiscount && !hasBillExtraCost) {
       clearEntryDraft();
       return;
     }
@@ -178,6 +203,7 @@ function saveEntryDraft() {
       type: entryType,
       items: entryBillItems,
       discount: entryBillDiscount,
+      extraCost: round2(Number(entryBillExtraCost) || 0),
       inputs,
       ts: Date.now()
     };
@@ -219,6 +245,7 @@ function applyEntryDraft(draft, restoreInputLine = true) {
     entryBillDiscount = (draft.discount && typeof draft.discount === 'object')
       ? { type: draft.discount.type === 'amount' ? 'amount' : 'percent', value: Number(draft.discount.value) || 0 }
       : { type: 'percent', value: 0 };
+    entryBillExtraCost = round2(Number(draft.extraCost) || 0);
     const i = draft.inputs || {};
     const setVal = (id, v) => { const el = document.getElementById(id); if(el) el.value = (v == null ? '' : v); };
     if(restoreInputLine) {
@@ -283,6 +310,7 @@ function renderEntryBillCart() {
     </div>`;
   }).join('');
   const billTotal = getEntryBillTotal();
+  const billExtraCost = buildEntryBillMetrics(entryBillItems, entryBillDiscount, entryType).extraCostTotal;
   const billDiscount = getEntryBillDiscountAmount();
   const billNetTotal = getEntryBillNetTotal();
   const billProfit = getEntryBillProfit();
@@ -290,17 +318,41 @@ function renderEntryBillCart() {
   const profitHtml = entryType === 'sale'
     ? `<div style="display:flex;justify-content:space-between;align-items:center;padding-top:4px"><span style="font-size:0.82rem;color:var(--ink2)">${profitLabel}</span><b style="color:${billProfit>=0?'var(--green)':'var(--red)'}">${fmt(billProfit)}</b></div>`
     : '';
-  const discountUi = entryType === 'sale' ? `<div style="display:grid;grid-template-columns:120px 1fr;gap:8px;margin-top:10px">
+  const discountValueAttr = Number(entryBillDiscount.value) > 0 ? ` value="${round2(Number(entryBillDiscount.value))}"` : '';
+  const extraCostValueAttr = Number(entryBillExtraCost) > 0 ? ` value="${round2(Number(entryBillExtraCost))}"` : '';
+  const discountUi = entryType === 'sale' ? `<div style="margin-top:10px">
+    <div style="font-size:0.72rem;font-weight:700;color:var(--ink2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Select Discount Type</div>
+    <div style="display:grid;grid-template-columns:120px 1fr;gap:8px">
     <select id="entryBillDiscountType" onchange="onEntryBillDiscountTypeChange()">
       <option value="percent" ${(entryBillDiscount.type||'percent')==='percent'?'selected':''}>Discount %</option>
       <option value="amount" ${(entryBillDiscount.type||'percent')==='amount'?'selected':''}>Discount Amount</option>
     </select>
-    <input id="entryBillDiscountValue" type="number" min="0" step="0.01" value="${round2(Number(entryBillDiscount.value)||0)}" oninput="onEntryBillDiscountValueInput(false)" onchange="onEntryBillDiscountValueInput(true)" onblur="onEntryBillDiscountValueInput(true)" placeholder="0">
+    <input id="entryBillDiscountValue" type="number" min="0" step="0.01"${discountValueAttr} oninput="onEntryBillDiscountValueInput(false)" onchange="onEntryBillDiscountValueInput(true)" onblur="onEntryBillDiscountValueInput(true)" placeholder="0">
+    </div>
+  </div>` : '';
+  const invoiceExtraUi = entryType === 'purchase' ? `<div style="display:grid;grid-template-columns:150px 1fr;gap:8px;margin-top:10px;align-items:center">
+    <div style="font-size:0.82rem;color:var(--ink2);font-weight:700">Invoice Extra Costing ৳</div>
+    <input id="entryBillExtraCostValue" type="number" min="0" step="0.01"${extraCostValueAttr} oninput="onEntryBillExtraCostInput(false)" onchange="onEntryBillExtraCostInput(true)" onblur="onEntryBillExtraCostInput(true)" placeholder="0.00">
   </div>` : '';
   const discountRow = (entryType === 'sale' && billDiscount>0)
     ? `<div style="display:flex;justify-content:space-between;align-items:center;padding-top:4px"><span style="font-size:0.82rem;color:var(--ink2)">Discount</span><b style="color:var(--red)">-${fmt(billDiscount)}</b></div>`
     : '';
-  cart.innerHTML = `<div style="font-size:0.75rem;font-weight:700;color:var(--ink2);margin-bottom:6px">Current Bill (${entryBillItems.length} item${entryBillItems.length>1?'s':''})</div>${lines}${discountUi}<div style="display:flex;justify-content:space-between;align-items:center;padding-top:8px"><span style="font-size:0.82rem;color:var(--ink2)">Gross Total</span><b style="color:var(--gold)">${fmt(billTotal)}</b></div>${discountRow}<div style="display:flex;justify-content:space-between;align-items:center;padding-top:4px"><b>Net Total</b><b style="color:var(--green)">${fmt(billNetTotal)}</b></div>${profitHtml}`;
+  const extraCostRow = entryType === 'purchase'
+    ? `<div id="entryBillExtraCostRow" style="display:${billExtraCost > 0 ? 'flex' : 'none'};justify-content:space-between;align-items:center;padding-top:4px"><span style="font-size:0.82rem;color:var(--ink2)">Extra Costing (cash)</span><b id="entryBillExtraCostDisplay" style="color:var(--red)">+${fmt(billExtraCost)}</b></div>`
+    : '';
+  const visibleNetTotal = entryType === 'purchase' ? round2(billNetTotal + billExtraCost) : billNetTotal;
+  cart.innerHTML = `<div style="font-size:0.75rem;font-weight:700;color:var(--ink2);margin-bottom:6px">Current Bill (${entryBillItems.length} item${entryBillItems.length>1?'s':''})</div>${lines}${discountUi}${invoiceExtraUi}<div style="display:flex;justify-content:space-between;align-items:center;padding-top:8px"><span style="font-size:0.82rem;color:var(--ink2)">Gross Total</span><b style="color:var(--gold)">${fmt(billTotal)}</b></div>${discountRow}${extraCostRow}<div style="display:flex;justify-content:space-between;align-items:center;padding-top:4px"><b>Net Total</b><b id="entryBillNetTotalDisplay" style="color:var(--green)">${fmt(visibleNetTotal)}</b></div>${profitHtml}`;
+}
+
+function updateEntryBillCartTotalsOnly() {
+  if(!(entryType === 'purchase' && entryBillItems.length > 0)) return;
+  const metrics = buildEntryBillMetrics(entryBillItems, entryBillDiscount, entryType);
+  const extraEl = document.getElementById('entryBillExtraCostDisplay');
+  if(extraEl) extraEl.textContent = '+' + fmt(metrics.extraCostTotal);
+  const netEl = document.getElementById('entryBillNetTotalDisplay');
+  if(netEl) netEl.textContent = fmt(round2(metrics.netTotal + metrics.extraCostTotal));
+  const rowEl = document.getElementById('entryBillExtraCostRow');
+  if(rowEl) rowEl.style.display = metrics.extraCostTotal > 0 ? 'flex' : 'none';
 }
 function onEntryBillDiscountTypeChange() {
   const typeEl = document.getElementById('entryBillDiscountType');
@@ -308,6 +360,7 @@ function onEntryBillDiscountTypeChange() {
   renderEntryBillCart();
   updateCreditPreview();
   updateSupplierPayPreview();
+  if(typeof updatePurchaseFundingPreview === 'function') updatePurchaseFundingPreview();
   saveEntryDraft();
 }
 function onEntryBillDiscountValueInput(commitRender = false) {
@@ -317,6 +370,16 @@ function onEntryBillDiscountValueInput(commitRender = false) {
   if(commitRender) renderEntryBillCart();
   updateCreditPreview();
   updateSupplierPayPreview();
+  if(typeof updatePurchaseFundingPreview === 'function') updatePurchaseFundingPreview();
+  if(commitRender) saveEntryDraft(); else saveEntryDraftDebounced();
+}
+function onEntryBillExtraCostInput(commitRender = false) {
+  const valEl = document.getElementById('entryBillExtraCostValue');
+  const raw = round2(Number(valEl?.value) || 0);
+  entryBillExtraCost = raw < 0 ? 0 : raw;
+  if(commitRender) renderEntryBillCart(); else updateEntryBillCartTotalsOnly();
+  updateSupplierPayPreview();
+  if(typeof updatePurchaseFundingPreview === 'function') updatePurchaseFundingPreview();
   if(commitRender) saveEntryDraft(); else saveEntryDraftDebounced();
 }
 function removeEntryBillItem(idx) {
@@ -325,14 +388,17 @@ function removeEntryBillItem(idx) {
   renderEntryBillCart();
   updateCreditPreview();
   updateSupplierPayPreview();
+  if(typeof updatePurchaseFundingPreview === 'function') updatePurchaseFundingPreview();
   saveEntryDraft();
 }
 function clearEntryBill() {
   entryBillItems = [];
   entryBillDiscount = { type: 'percent', value: 0 };
+  entryBillExtraCost = 0;
   renderEntryBillCart();
   updateCreditPreview();
   updateSupplierPayPreview();
+  if(typeof updatePurchaseFundingPreview === 'function') updatePurchaseFundingPreview();
 }
 function addCurrentItemToBill() {
   if(!(entryType === 'sale' || entryType === 'purchase')) {
@@ -360,6 +426,7 @@ function addCurrentItemToBill() {
   renderEntryBillCart();
   updateCreditPreview();
   updateSupplierPayPreview();
+  if(typeof updatePurchaseFundingPreview === 'function') updatePurchaseFundingPreview();
   saveEntryDraft();
   toast('✅ Item added to bill');
 }

@@ -4,11 +4,64 @@
 // entry-form toggles), so load order is safe. Depends on globals: buildCreditMetrics,
 // getSupplierDue, getCreditDue, getCreditTotalPaid, getSupplierTotalPaid,
 // normalizePhone, round2, fmt, todayStr, getEntryWorkingTotal, pgReset,
-// groupSupplierCredits, groupCustomerCredits, getProd, dateToYMDLocal, data,
+// groupSupplierCredits, groupCustomerCredits, getProd, dateToYMDLocal, displayDateTime, data,
 // renderPaged, creditPartyMode, creditFilter (state vars in index.html), and the
 // payment-modal openers in modules/payments.js (openPayModal, openSupplierPayModal,
 // openPayModalByCustomerKey, openSupplierPayModalByKey, deleteCredit,
 // deleteSupplierCredit, editPaymentEntry, deletePaymentEntry).
+
+function creditSearchHaystack(parts) {
+  return parts
+    .filter(v => v !== undefined && v !== null && String(v).trim() !== '')
+    .map(v => String(v).toLowerCase())
+    .join(' ');
+}
+
+function creditProductSearchParts(items, fallbackProductId, fallbackQty, fallbackPrice) {
+  const rows = Array.isArray(items) && items.length
+    ? items
+    : [{ productId: fallbackProductId, qty: fallbackQty, price: fallbackPrice }];
+  return rows.flatMap(item => {
+    const product = getProd(item.productId);
+    return [
+      product?.name,
+      product?.code,
+      product?.category,
+      product?.unit,
+      item.qty,
+      item.price
+    ];
+  });
+}
+
+function creditRecordMatchesQuery(row, query, partyType) {
+  const q = String(query || '').toLowerCase().trim();
+  if(!q) return true;
+  const qPhone = normalizePhone(q);
+  const isSupplier = partyType === 'supplier';
+  const name = isSupplier ? row.supplierName : row.customerName;
+  const phone = isSupplier ? row.supplierPhone : row.customerPhone;
+  const due = isSupplier ? getSupplierDue(row) : getCreditDue(row);
+  const paid = isSupplier ? getSupplierTotalPaid(row) : getCreditTotalPaid(row);
+  const productParts = creditProductSearchParts(row.products, row.productId, row.qty, row.price);
+  const dateOnly = dateToYMDLocal(row.date);
+  const haystack = creditSearchHaystack([
+    name,
+    phone,
+    normalizePhone(phone || ''),
+    row.billId,
+    row.txId,
+    row.id,
+    dateOnly,
+    typeof displayDateOnly === 'function' ? displayDateOnly(row.date) : '',
+    typeof displayDateTime === 'function' ? displayDateTime(row.date) : '',
+    row.total,
+    paid,
+    due,
+    ...productParts
+  ]);
+  return haystack.includes(q) || (!!qPhone && haystack.includes(qPhone));
+}
 
 function buildCreditPageMetrics(creditPartyMode, creditFilter, query) {
   const centralCredit = buildCreditMetrics('daily', todayStr());
@@ -25,14 +78,11 @@ function buildCreditPageMetrics(creditPartyMode, creditFilter, query) {
   if(creditPartyMode === 'supplier') {
     if(creditFilter==='due') list = list.filter(sc=>getSupplierDue(sc)>0);
     if(creditFilter==='done') list = list.filter(sc=>getSupplierDue(sc)<=0);
-    if(q) list = list.filter(sc=>(sc.supplierName||'').toLowerCase().includes(q));
+    if(q) list = list.filter(sc=>creditRecordMatchesQuery(sc, q, 'supplier'));
   } else {
     if(creditFilter==='due') list = list.filter(c=>getCreditDue(c)>0);
     if(creditFilter==='done') list = list.filter(c=>getCreditDue(c)<=0);
-    if(q) list = list.filter(c =>
-      (c.customerName||'').toLowerCase().includes(q) ||
-      normalizePhone(c.customerPhone || '').includes(normalizePhone(q))
-    );
+    if(q) list = list.filter(c=>creditRecordMatchesQuery(c, q, 'customer'));
   }
   return {
     allCredits,
@@ -69,6 +119,7 @@ function onSupplierPayToggle() {
     document.getElementById('supplierPayPreviewPills').style.display='none';
   }
   updateSupplierPayPreview();
+  if(typeof updatePurchaseFundingPreview === 'function') updatePurchaseFundingPreview();
 }
 
 function updateSupplierPayPreview() {
@@ -84,6 +135,7 @@ function updateSupplierPayPreview() {
   } else {
     pills.style.display='none';
   }
+  if(typeof updatePurchaseFundingPreview === 'function') updatePurchaseFundingPreview();
 }
 
 function updateCreditPreview() {
@@ -118,7 +170,7 @@ function setCreditPartyMode(mode) {
     sBtn.style.color = isSupplier ? '' : 'var(--ink2)';
   }
   const search = document.getElementById('creditSearch');
-  if(search) search.placeholder = isSupplier ? '🔍 Search supplier name...' : '🔍 Search customer name...';
+  if(search) search.placeholder = isSupplier ? '🔍 Search supplier, phone, bill, product...' : '🔍 Search customer, phone, bill, product...';
   setCreditFilter('all');
 }
 
@@ -166,7 +218,7 @@ function renderCreditPage() {
       const pct = total>0 ? Math.min(100,(paid/total*100)).toFixed(0) : 0;
     const settled = due<=0.001;
     const openBillCount = g.bills.filter(sc => getSupplierDue(sc) > 0.001).length;
-      const latestDate = g.bills.length ? dateToYMDLocal(g.bills.slice().sort((a,b)=>new Date(b.date)-new Date(a.date))[0].date) : '-';
+      const latestDate = g.bills.length ? (displayDateTime(g.bills.slice().sort((a,b)=>new Date(b.date)-new Date(a.date))[0].date) || dateToYMDLocal(g.bills.slice().sort((a,b)=>new Date(b.date)-new Date(a.date))[0].date)) : '-';
       const phoneText = g.supplierPhone ? ` · 📞 ${g.supplierPhone}` : '';
       const billRows = g.bills
         .slice()
@@ -188,8 +240,8 @@ function renderCreditPage() {
           const scProdBreakdown = `<div id="sbd_${sc.id}" style="display:none;margin-top:8px;border-radius:7px;background:var(--surface2);padding:6px 8px"><div style="font-size:0.62rem;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--ink2);margin-bottom:5px">Bill Breakdown</div><table style="width:100%;border-collapse:collapse;font-size:0.72rem"><thead><tr style="border-bottom:1px solid var(--border)"><th style="text-align:left;padding:3px 4px;color:var(--ink2);font-weight:600">Product</th><th style="text-align:right;padding:3px 4px;color:var(--ink2);font-weight:600">Qty</th><th style="text-align:right;padding:3px 4px;color:var(--ink2);font-weight:600">Unit Price</th><th style="text-align:right;padding:3px 4px;color:var(--ink2);font-weight:600">Subtotal</th></tr></thead><tbody>${scProds.map(r=>`<tr style="border-bottom:1px dashed var(--border)"><td style="padding:4px 4px;font-weight:600">${r.name}</td><td style="text-align:right;padding:4px 4px;color:var(--ink2)">${r.qty} ${r.unit}</td><td style="text-align:right;padding:4px 4px;color:var(--ink2)">${fmt(r.price)}</td><td style="text-align:right;padding:4px 4px;font-weight:700">${fmt(r.sub)}</td></tr>`).join('')}</tbody><tfoot><tr style="border-top:1.5px solid var(--border)"><td colspan="3" style="text-align:right;padding:5px 4px;font-weight:700;color:var(--ink2)">Total</td><td style="text-align:right;padding:5px 4px;font-weight:700;color:var(--ink);font-size:0.82rem">${fmt(sc.total)}</td></tr></tfoot></table></div>`;
           const scPayments = (data.supplierPayments || []).filter(p=>String(p.scId)===String(sc.id)).slice().sort((a,b)=>new Date(a.date)-new Date(b.date));
           const scHistRows = [];
-          if(scInitialPaid > 0) scHistRows.push(`<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px dashed var(--border)"><span style="font-size:0.68rem;color:var(--ink2)">📅 ${dateToYMDLocal(sc.date)} &nbsp;·&nbsp; Initial</span><span style="font-size:0.7rem;font-weight:700;color:var(--blue)">+${fmt(scInitialPaid)}</span></div>`);
-          scPayments.forEach(p=>{const pDate=dateToYMDLocal(p.date);const note=p.note?` · ${p.note}`:'';scHistRows.push(`<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px dashed var(--border)"><span style="font-size:0.68rem;color:var(--ink2)">📅 ${pDate}${note}</span><div style="display:flex;align-items:center;gap:3px"><span style="font-size:0.7rem;font-weight:700;color:var(--blue)">+${fmt(Number(p.amount)||0)}</span><button onclick="editPaymentEntry('${p.id}','supplier')" style="background:none;border:none;cursor:pointer;font-size:0.78rem;padding:1px 4px;color:var(--gold);line-height:1" title="Edit">✏️</button><button onclick="deletePaymentEntry('${p.id}','supplier')" style="background:none;border:none;cursor:pointer;font-size:0.78rem;padding:1px 4px;color:var(--red);line-height:1" title="Delete">🗑</button></div></div>`);});
+          if(scInitialPaid > 0) scHistRows.push(`<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px dashed var(--border)"><span style="font-size:0.68rem;color:var(--ink2)">📅 ${displayDateTime(sc.date) || dateToYMDLocal(sc.date)} &nbsp;·&nbsp; Initial</span><span style="font-size:0.7rem;font-weight:700;color:var(--blue)">+${fmt(scInitialPaid)}</span></div>`);
+          scPayments.forEach(p=>{const pDate=displayDateTime(p.date)||dateToYMDLocal(p.date);const note=p.note?` · ${p.note}`:'';scHistRows.push(`<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px dashed var(--border)"><span style="font-size:0.68rem;color:var(--ink2)">📅 ${pDate}${note}</span><div style="display:flex;align-items:center;gap:3px"><span style="font-size:0.7rem;font-weight:700;color:var(--blue)">+${fmt(Number(p.amount)||0)}</span><button onclick="editPaymentEntry('${p.id}','supplier')" style="background:none;border:none;cursor:pointer;font-size:0.78rem;padding:1px 4px;color:var(--gold);line-height:1" title="Edit">✏️</button><button onclick="deletePaymentEntry('${p.id}','supplier')" style="background:none;border:none;cursor:pointer;font-size:0.78rem;padding:1px 4px;color:var(--red);line-height:1" title="Delete">🗑</button></div></div>`);});
           const scHistHtml = scHistRows.length>0
             ? `<div style="margin-top:7px;border-radius:7px;background:var(--blue-light);padding:5px 8px"><div style="font-size:0.62rem;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--ink2);margin-bottom:3px">Payment History</div>${scHistRows.join('')}<div style="display:flex;justify-content:space-between;padding-top:4px"><span style="font-size:0.68rem;font-weight:700;color:var(--ink2)">Total Paid</span><span style="font-size:0.7rem;font-weight:700;color:var(--blue)">${fmt(bPaid)}</span></div></div>`
             : `<div style="margin-top:5px;font-size:0.68rem;color:var(--ink2)">No payments recorded yet.</div>`;
@@ -197,7 +249,7 @@ function renderCreditPage() {
             <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;cursor:pointer" onclick="(function(){var d=document.getElementById('sbd_${sc.id}');if(d)d.style.display=d.style.display==='none'?'block':'none';})()">
               <div>
                 <div style="font-size:0.78rem;font-weight:700;color:var(--ink)">${billLabel} <span style="font-size:0.65rem;color:var(--gold);font-weight:600">▾ Details</span></div>
-                <div style="font-size:0.72rem;color:var(--ink2)">${dateToYMDLocal(sc.date)} · ${scItemsText}</div>
+                <div style="font-size:0.72rem;color:var(--ink2)">${displayDateTime(sc.date) || dateToYMDLocal(sc.date)} · ${scItemsText}</div>
               </div>
               <div style="text-align:right">
                 <div style="font-size:0.78rem;color:${bSettled?'var(--green)':'var(--red)'};font-weight:700">${bSettled?'✅ Settled':`Due: ${fmt(bDue)}`}</div>
@@ -256,15 +308,15 @@ function renderCreditPage() {
         const totalPaid = getCreditTotalPaid(credit);
         const initialPaid = round2(Number(credit.paid) || 0);
         const bSettled = due<=0.001;
-        const dateStr = dateToYMDLocal(credit.date);
-        const payments = data.payments.filter(p=>p.creditId===credit.id).slice().sort((a,b)=>new Date(a.date)-new Date(b.date));
+        const dateStr = displayDateTime(credit.date) || dateToYMDLocal(credit.date);
+        const payments = data.payments.filter(p=>String(p.creditId)===String(credit.id)).slice().sort((a,b)=>new Date(a.date)-new Date(b.date));
         // Product breakdown
         const cProds = (credit.products||[]).map(p=>{const pr=getProd(p.productId);const sub=round2((p.qty||0)*(p.price||0));return {name:pr?.name||'?',unit:pr?.unit||'',qty:p.qty||0,price:p.price||0,sub};});
         const cProdBreakdown = cProds.length>0?`<div id="cbd_${credit.id}" style="display:none;margin-top:8px;border-radius:7px;background:var(--surface2);padding:6px 8px"><div style="font-size:0.62rem;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--ink2);margin-bottom:5px">Bill Breakdown</div><table style="width:100%;border-collapse:collapse;font-size:0.72rem"><thead><tr style="border-bottom:1px solid var(--border)"><th style="text-align:left;padding:3px 4px;color:var(--ink2);font-weight:600">Product</th><th style="text-align:right;padding:3px 4px;color:var(--ink2);font-weight:600">Qty</th><th style="text-align:right;padding:3px 4px;color:var(--ink2);font-weight:600">Unit Price</th><th style="text-align:right;padding:3px 4px;color:var(--ink2);font-weight:600">Subtotal</th></tr></thead><tbody>${cProds.map(r=>`<tr style="border-bottom:1px dashed var(--border)"><td style="padding:4px 4px;font-weight:600">${r.name}</td><td style="text-align:right;padding:4px 4px;color:var(--ink2)">${r.qty} ${r.unit}</td><td style="text-align:right;padding:4px 4px;color:var(--ink2)">${fmt(r.price)}</td><td style="text-align:right;padding:4px 4px;font-weight:700">${fmt(r.sub)}</td></tr>`).join('')}</tbody><tfoot><tr style="border-top:1.5px solid var(--border)"><td colspan="3" style="text-align:right;padding:5px 4px;font-weight:700;color:var(--ink2)">Total</td><td style="text-align:right;padding:5px 4px;font-weight:700;color:var(--ink);font-size:0.82rem">${fmt(credit.total)}</td></tr></tfoot></table></div>`:'';
         // Payment history
         const histRows = [];
         if(initialPaid > 0) histRows.push(`<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px dashed var(--border)"><span style="font-size:0.68rem;color:var(--ink2)">📅 ${dateStr} &nbsp;·&nbsp; Initial</span><span style="font-size:0.7rem;font-weight:700;color:var(--green)">+${fmt(initialPaid)}</span></div>`);
-        payments.forEach(p=>{const pDate=dateToYMDLocal(p.date);const note=p.note?` · ${p.note}`:'';histRows.push(`<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px dashed var(--border)"><span style="font-size:0.68rem;color:var(--ink2)">📅 ${pDate}${note}</span><div style="display:flex;align-items:center;gap:3px"><span style="font-size:0.7rem;font-weight:700;color:var(--green)">+${fmt(Number(p.amount)||0)}</span><button onclick="editPaymentEntry('${p.id}','customer')" style="background:none;border:none;cursor:pointer;font-size:0.78rem;padding:1px 4px;color:var(--gold);line-height:1" title="Edit">✏️</button><button onclick="deletePaymentEntry('${p.id}','customer')" style="background:none;border:none;cursor:pointer;font-size:0.78rem;padding:1px 4px;color:var(--red);line-height:1" title="Delete">🗑</button></div></div>`);});
+        payments.forEach(p=>{const pDate=displayDateTime(p.date)||dateToYMDLocal(p.date);const note=p.note?` · ${p.note}`:'';histRows.push(`<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px dashed var(--border)"><span style="font-size:0.68rem;color:var(--ink2)">📅 ${pDate}${note}</span><div style="display:flex;align-items:center;gap:3px"><span style="font-size:0.7rem;font-weight:700;color:var(--green)">+${fmt(Number(p.amount)||0)}</span><button onclick="editPaymentEntry('${p.id}','customer')" style="background:none;border:none;cursor:pointer;font-size:0.78rem;padding:1px 4px;color:var(--gold);line-height:1" title="Edit">✏️</button><button onclick="deletePaymentEntry('${p.id}','customer')" style="background:none;border:none;cursor:pointer;font-size:0.78rem;padding:1px 4px;color:var(--red);line-height:1" title="Delete">🗑</button></div></div>`);});
         const histHtml = histRows.length>0
           ? `<div style="margin-top:7px;border-radius:7px;background:var(--green-light);padding:5px 8px"><div style="font-size:0.62rem;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--ink2);margin-bottom:3px">Payment History</div>${histRows.join('')}<div style="display:flex;justify-content:space-between;padding-top:4px"><span style="font-size:0.68rem;font-weight:700;color:var(--ink2)">Total Paid</span><span style="font-size:0.7rem;font-weight:700;color:var(--green)">${fmt(totalPaid)}</span></div></div>`
           : `<div style="margin-top:5px;font-size:0.68rem;color:var(--ink2)">No payments recorded yet.</div>`;

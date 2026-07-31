@@ -25,6 +25,40 @@ function clearPayError(elId) {
   if(e) { e.textContent = ''; e.style.display = 'none'; }
 }
 
+function creditAuditContext(credit, extra = {}) {
+  const p = credit?.productId ? getProd(credit.productId) : null;
+  return cleanAuditDetails({
+    creditId: credit?.id,
+    txId: credit?.txId,
+    billId: credit?.billId,
+    customer: credit?.customerName,
+    customerPhone: credit?.customerPhone,
+    product: p?.name || credit?.productId,
+    total: credit?.total,
+    paidBefore: getCreditTotalPaid(credit),
+    dueBefore: getCreditDue(credit),
+    date: dateToYMDLocal(credit?.date),
+    ...extra
+  });
+}
+
+function supplierCreditAuditContext(sc, extra = {}) {
+  const p = sc?.productId ? getProd(sc.productId) : null;
+  return cleanAuditDetails({
+    scId: sc?.id,
+    txId: sc?.txId,
+    billId: sc?.billId,
+    supplier: sc?.supplierName,
+    supplierPhone: sc?.supplierPhone,
+    product: p?.name || sc?.productId,
+    total: sc?.total,
+    paidBefore: getSupplierTotalPaid(sc),
+    dueBefore: getSupplierDue(sc),
+    date: dateToYMDLocal(sc?.date),
+    ...extra
+  });
+}
+
 function getOpenCustomerCreditsByKey(customerKey) {
   return (data.credits || [])
     .filter(c => !isCreditArchived(c) && getCreditCustomerKey(c) === customerKey && getCreditDue(c) > 0.0001)
@@ -52,7 +86,7 @@ function openPayModalByCustomerKey(customerKey) {
   document.getElementById('pmAmount').value      = '';
   document.getElementById('pmAmount').max        = due;
   document.getElementById('pmNote').value        = '';
-  document.getElementById('pmDate').value        = todayStr();
+  setAppDateValue('pmDate');
   document.getElementById('pmPreview').style.display = 'none';
   document.getElementById('payModalOverlay').classList.add('active');
   document.getElementById('payModal').style.display = 'block';
@@ -74,7 +108,7 @@ function openSupplierPayModalByKey(supplierKey) {
   document.getElementById('supPmDue').textContent   = fmt(due);
   document.getElementById('supPmAmount').value      = '';
   document.getElementById('supPmNote').value        = '';
-  document.getElementById('supPmDate').value        = todayStr();
+  setAppDateValue('supPmDate');
   document.getElementById('supPmPreview').style.display = 'none';
   document.getElementById('supPayModalOverlay').classList.add('active');
   document.getElementById('supPayModal').style.display = 'block';
@@ -95,7 +129,7 @@ function openPayModal(creditId) {
   document.getElementById('pmAmount').value      = '';
   document.getElementById('pmAmount').max        = due;
   document.getElementById('pmNote').value        = '';
-  document.getElementById('pmDate').value        = todayStr();
+  setAppDateValue('pmDate');
   document.getElementById('pmPreview').style.display = 'none';
   document.getElementById('payModalOverlay').classList.add('active');
   document.getElementById('payModal').style.display = 'block';
@@ -133,7 +167,7 @@ function closePayModal() {
 
 async function savePayment() {
   const amount = round2(parseFloat(document.getElementById('pmAmount').value));
-  const date   = document.getElementById('pmDate').value || todayStr();
+  const date   = readAppDateValue('pmDate');
   if(!(await requireMonthUnlockOverride(date, 'customer due payment'))) return;
   const note   = document.getElementById('pmNote').value.trim();
   const due = activePayCreditId !== null
@@ -155,7 +189,7 @@ async function savePayment() {
         // due/settled are derived live; never persist stale copies.
         delete credit.due;
         delete credit.settled;
-        auditLog('customer_payment_saved', { creditId: credit.id, customer: credit.customerName, amount, date });
+        auditLog('customer_payment_saved', creditAuditContext(credit, { amount, paymentDate: date, note }));
       } else {
         let remain = amount;
         const credits = getOpenCustomerCreditsByKey(activePayCustomerKey);
@@ -168,7 +202,15 @@ async function savePayment() {
             remain = round2(remain - take);
           }
         });
-        auditLog('customer_group_payment_saved', { customerKey: activePayCustomerKey, amount, date });
+        auditLog('customer_group_payment_saved', cleanAuditDetails({
+          customerKey: activePayCustomerKey,
+          customer: credits[0]?.customerName,
+          customerPhone: credits[0]?.customerPhone,
+          billsPaid: credits.length,
+          creditIds: credits.map(c => c.id),
+          amount,
+          paymentDate: date
+        }));
       }
     },
     onSuccess: () => closePayModal()
@@ -199,7 +241,7 @@ async function deleteCredit(creditId) {
       credit.archived = true;
       credit.archivedAt = new Date().toISOString();
       credit.archiveReason = reason;
-      auditLog('customer_credit_archived', { creditId, customer: credit.customerName, reason });
+      auditLog('customer_credit_archived', creditAuditContext(credit, { reason }));
     }
   });
 }
@@ -228,7 +270,7 @@ async function deleteSupplierCredit(scId) {
       sc.archived = true;
       sc.archivedAt = new Date().toISOString();
       sc.archiveReason = reason;
-      auditLog('supplier_credit_archived', { scId, supplier: sc.supplierName, reason });
+      auditLog('supplier_credit_archived', supplierCreditAuditContext(sc, { reason }));
     }
   });
 }
@@ -250,7 +292,7 @@ function openSupplierPayModal(scId) {
   document.getElementById('supPmDue').textContent   = fmt(due);
   document.getElementById('supPmAmount').value      = '';
   document.getElementById('supPmNote').value        = '';
-  document.getElementById('supPmDate').value        = todayStr();
+  setAppDateValue('supPmDate');
   document.getElementById('supPmPreview').style.display = 'none';
   document.getElementById('supPayModalOverlay').classList.add('active');
   document.getElementById('supPayModal').style.display = 'block';
@@ -301,7 +343,7 @@ function editPaymentEntry(paymentId, type) {
     : ((data.credits||[]).find(c => String(c.id) === String(p.creditId))?.customerName || 'Customer');
   document.getElementById('editPayModalSub').textContent = parentName;
   document.getElementById('editPmAmount').value = p.amount;
-  document.getElementById('editPmDate').value = dateToYMDLocal(p.date);
+  setAppDateValue('editPmDate', p.date);
   document.getElementById('editPmNote').value = p.note || '';
   document.getElementById('editPayModalOverlay').classList.add('active');
   document.getElementById('editPayModal').style.display = 'block';
@@ -317,7 +359,7 @@ function closeEditPayModal() {
 
 async function saveEditPayment() {
   const amount = round2(parseFloat(document.getElementById('editPmAmount').value)||0);
-  const date = document.getElementById('editPmDate').value || todayStr();
+  const date = readAppDateValue('editPmDate');
   const note = document.getElementById('editPmNote').value.trim();
   if(amount <= 0) { toast('⚠️ Enter a valid amount.'); return; }
   if(!activeEditPaymentId || !activeEditPaymentType) return;
@@ -330,7 +372,7 @@ async function saveEditPayment() {
     if(sp) {
       const sc = (data.supplierCredits||[]).find(c => String(c.id) === String(sp.scId));
       if(sc) {
-        const otherPaid = round2((data.supplierPayments||[]).filter(x => String(x.id) !== String(paymentId) && x.scId === sp.scId).reduce((s,x)=>s+(Number(x.amount)||0),0));
+        const otherPaid = round2((data.supplierPayments||[]).filter(x => String(x.id) !== String(paymentId) && String(x.scId) === String(sp.scId)).reduce((s,x)=>s+(Number(x.amount)||0),0));
         const initialPaid = Number(sc.paid) || 0;
         const maxAllowed = round2((Number(sc.total)||0) - initialPaid - otherPaid);
         if(!moneyLte(amount, maxAllowed)) { toast('⚠️ The amount cannot be more than the remaining due.'); return; }
@@ -341,7 +383,7 @@ async function saveEditPayment() {
     if(cp) {
       const cr = (data.credits||[]).find(c => String(c.id) === String(cp.creditId));
       if(cr) {
-        const otherPaid = round2((data.payments||[]).filter(x => String(x.id) !== String(paymentId) && x.creditId === cp.creditId).reduce((s,x)=>s+(Number(x.amount)||0),0));
+        const otherPaid = round2((data.payments||[]).filter(x => String(x.id) !== String(paymentId) && String(x.creditId) === String(cp.creditId)).reduce((s,x)=>s+(Number(x.amount)||0),0));
         const initialPaid = Number(cr.paid) || 0;
         const maxAllowed = round2((Number(cr.total)||0) - initialPaid - otherPaid);
         if(!moneyLte(amount, maxAllowed)) { toast('⚠️ The amount cannot be more than the remaining due.'); return; }
@@ -361,9 +403,29 @@ async function saveEditPayment() {
       arr[idx].amount = amount;
       arr[idx].date = toIsoFromLocalDate(date);
       arr[idx].note = note;
-      auditLog(type === 'supplier' ? 'supplier_payment_edited' : 'customer_payment_edited', {
-        paymentId, oldAmount: old.amount, newAmount: amount, oldDate: old.date, newDate: toIsoFromLocalDate(date), note
-      });
+      if(type === 'supplier') {
+        const sp = arr[idx];
+        const sc = (data.supplierCredits || []).find(c => String(c.id) === String(sp.scId));
+        auditLog('supplier_payment_edited', supplierCreditAuditContext(sc, {
+          paymentId,
+          oldAmount: old.amount,
+          newAmount: amount,
+          oldDate: dateToYMDLocal(old.date),
+          newDate: date,
+          note
+        }));
+      } else {
+        const cp = arr[idx];
+        const cr = (data.credits || []).find(c => String(c.id) === String(cp.creditId));
+        auditLog('customer_payment_edited', creditAuditContext(cr, {
+          paymentId,
+          oldAmount: old.amount,
+          newAmount: amount,
+          oldDate: dateToYMDLocal(old.date),
+          newDate: date,
+          note
+        }));
+      }
     },
     onSuccess: () => closeEditPayModal()
   });
@@ -379,13 +441,15 @@ async function deletePaymentEntry(paymentId, type) {
       if(type === 'supplier') {
         const sp = (data.supplierPayments||[]).find(p=>String(p.id)===String(paymentId));
         if(!sp) throw new Error('Payment not found');
+        const sc = (data.supplierCredits || []).find(c => String(c.id) === String(sp.scId));
         data.supplierPayments = data.supplierPayments.filter(p=>String(p.id)!==String(paymentId));
-        auditLog('supplier_payment_deleted', { paymentId, amount: sp.amount, scId: sp.scId });
+        auditLog('supplier_payment_deleted', supplierCreditAuditContext(sc, { paymentId, amount: sp.amount }));
       } else {
         const cp = (data.payments||[]).find(p=>String(p.id)===String(paymentId));
         if(!cp) throw new Error('Payment not found');
+        const cr = (data.credits || []).find(c => String(c.id) === String(cp.creditId));
         data.payments = data.payments.filter(p=>String(p.id)!==String(paymentId));
-        auditLog('customer_payment_deleted', { paymentId, amount: cp.amount, creditId: cp.creditId });
+        auditLog('customer_payment_deleted', creditAuditContext(cr, { paymentId, amount: cp.amount }));
       }
     }
   });
@@ -393,7 +457,7 @@ async function deletePaymentEntry(paymentId, type) {
 
 async function saveSupplierPayment() {
   const amount = round2(parseFloat(document.getElementById('supPmAmount').value));
-  const date   = document.getElementById('supPmDate').value || todayStr();
+  const date   = readAppDateValue('supPmDate');
   if(!(await requireMonthUnlockOverride(date, 'supplier due payment'))) return;
   const note   = document.getElementById('supPmNote').value.trim();
   const due = activeSupCreditId !== null
@@ -416,7 +480,7 @@ async function saveSupplierPayment() {
         // due/settled are derived live; never persist stale copies.
         delete sc.due;
         delete sc.settled;
-        auditLog('supplier_payment_saved', { scId: sc.id, supplier: sc.supplierName, amount, date });
+        auditLog('supplier_payment_saved', supplierCreditAuditContext(sc, { amount, paymentDate: date, note }));
       } else {
         let remain = amount;
         const credits = getOpenSupplierCreditsByKey(activeSupSupplierKey);
@@ -429,7 +493,15 @@ async function saveSupplierPayment() {
             remain = round2(remain - take);
           }
         });
-        auditLog('supplier_group_payment_saved', { supplierKey: activeSupSupplierKey, amount, date });
+        auditLog('supplier_group_payment_saved', cleanAuditDetails({
+          supplierKey: activeSupSupplierKey,
+          supplier: credits[0]?.supplierName,
+          supplierPhone: credits[0]?.supplierPhone,
+          billsPaid: credits.length,
+          scIds: credits.map(sc => sc.id),
+          amount,
+          paymentDate: date
+        }));
       }
     },
     onSuccess: () => closeSupplierPayModal()

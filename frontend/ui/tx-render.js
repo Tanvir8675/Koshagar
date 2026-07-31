@@ -2,7 +2,7 @@
 // Phase 3 extraction. Classic script sharing index.html's global scope; loaded
 // after the main script. Runtime-only (used by dashboard/reports/invoice/calc
 // at render time), so load order is safe. Depends on globals: getProd,
-// dateToYMDLocal, fmt, data, getLinkedReturnRows, round2,
+// dateToYMDLocal, displayDateOnly, displayDateTime, fmt, data, getLinkedReturnRows, round2,
 // getSaleReturnProfitImpact, escapeHtml, and onclick handlers (startReturnFromTx,
 // editTx, deleteTx).
 
@@ -11,8 +11,7 @@ function txRow(t, opts = {}) {
   const suppressInvoiceButton = !!opts.suppressInvoiceButton;
   const suppressReturnMeta = !!opts.suppressReturnMeta;
   const p = getProd(t.productId);
-  const txDate = dateToYMDLocal(t.date) || '';
-  const time = new Date(t.date).toLocaleTimeString('en',{hour:'2-digit',minute:'2-digit'});
+  const txDate = displayDateTime(t.date) || '';
   const isSaleReturn     = t.type==='return' && t.returnType==='sale-return';
   const isPurchaseReturn = t.type==='return' && t.returnType==='purchase-return';
   const isLegacyReturn   = t.type==='return' && !t.returnType;
@@ -31,7 +30,7 @@ function txRow(t, opts = {}) {
     const orig = data.transactions.find(tx=>tx.id===t.linkedTxId);
     if(orig) {
       const origProd = getProd(orig.productId);
-      const origDate = dateToYMDLocal(orig.date);
+      const origDate = displayDateTime(orig.date) || dateToYMDLocal(orig.date);
       const origType = orig.type==='sale'?'Sale':'Purchase';
       linkedInfo = `<div style="font-size:0.68rem;color:var(--ink2);margin-top:3px;padding:3px 7px;background:var(--surface2);border-radius:6px;display:inline-block">🔗 ${origType} #${orig.id} · ${origDate} · ${fmt(orig.total)}</div>`;
     } else {
@@ -77,16 +76,25 @@ function txRow(t, opts = {}) {
       linkedInfo += `<div style="font-size:0.68rem;color:var(--ink2);margin-top:3px;padding:3px 7px;background:var(--surface2);border-radius:6px;display:inline-block">Net after return: ${netQty} ${u} (Returned ${returnedQty})</div>`;
     }
   }
+  const purchaseCostBreakdown = (t.type === 'purchase' && (Number(t.lineExtraCost) || 0) > 0)
+    ? `<div style="font-size:0.68rem;color:var(--ink2);margin-top:2px;white-space:nowrap">Product Cost ${fmt(Number(t.total)||0)} + Extra ${fmt(Number(t.lineExtraCost)||0)}</div>`
+    : '';
+  const editHistory = Array.isArray(t.editHistory) ? t.editHistory : [];
+  const latestEdit = editHistory.length ? editHistory[editHistory.length - 1] : null;
+  const editTrace = latestEdit
+    ? `<div style="font-size:0.68rem;color:var(--gold);margin-top:3px;padding:3px 7px;background:var(--gold-light);border-radius:6px;display:inline-block">Edited ${displayDateTime(latestEdit.at) || dateToYMDLocal(latestEdit.at) || ''}${Array.isArray(latestEdit.changes) && latestEdit.changes.length ? ` · ${escapeHtml(latestEdit.changes.slice(0, 3).join(' · '))}${latestEdit.changes.length > 3 ? ' · more' : ''}` : ''}</div>`
+    : '';
   return `<div class="tx-item">
     <div class="tx-icon ${typeClass}">${typeIcon}</div>
     <div class="tx-body"><div class="tx-name">${p?.name||'?'}</div>
-      <div class="tx-sub">${t.qty} ${p?.unit||''} · ${fmt(getDisplayUnitPrice(t))}/unit · ${txDate} ${time}${billText}${t.reason?' · '+t.reason:''}</div>
-      ${linkedInfo}</div>
+      <div class="tx-sub">${t.qty} ${p?.unit||''} · ${fmt(getDisplayUnitPrice(t))}/unit · ${txDate}${billText}${t.reason?' · '+t.reason:''}</div>
+      ${linkedInfo}${editTrace}</div>
     <div class="tx-right" style="display:flex;align-items:center;gap:8px">
       <div><div class="tx-amount ${typeClass}">${fmt(getDisplayLineTotal(t))}</div>
+        ${purchaseCostBreakdown}
         <div class="tx-type-tag">${typeLabel}</div>
       </div>
-      ${''}
+      ${(!suppressInvoiceButton && (t.type === 'sale' || t.type === 'purchase')) ? `<button class="del-btn" style="color:var(--blue);opacity:0.75" onclick="openInvoiceFromTx(${t.id})" title="Print invoice">Invoice</button>` : ''}
       ${t.type!=='return'?`<button class="del-btn" style="color:var(--gold);opacity:0.7" onclick="startReturnFromTx(${t.id})" title="Return this transaction">↩️</button>`:''}
       <button class="del-btn" style="color:var(--blue);opacity:0.6" onclick="editTx(${t.id})" title="Edit this entry">✏️</button>
       <button class="del-btn" onclick="deleteTx(${t.id})" title="Delete this entry" style="color:var(--red);opacity:0.6">✕</button>
@@ -121,12 +129,33 @@ function getTxSupplierName(tx) {
 }
 function getDisplayUnitPrice(tx) {
   if(!tx) return 0;
+  if(tx.type === 'purchase') {
+    const extra = Number(tx.lineExtraCost) || 0;
+    const landed = Number(tx.landedUnitCost);
+    if(extra > 0 && Number.isFinite(landed) && landed > 0) return round2(landed);
+    const totalWithExtra = round2((Number(tx.netAmount) || Number(tx.total) || 0) + extra);
+    const qtyForExtra = Number(tx.qty);
+    if(extra > 0 && totalWithExtra > 0 && Number.isFinite(qtyForExtra) && qtyForExtra > 0) {
+      return round2(totalWithExtra / qtyForExtra);
+    }
+    const net = Number(tx.netUnitCost);
+    if(Number.isFinite(net) && net > 0) return round2(net);
+    const total = Number(tx.netAmount) || Number(tx.total);
+    const qty = Number(tx.qty);
+    if(Number.isFinite(total) && total > 0 && Number.isFinite(qty) && qty > 0) {
+      return round2(total / qty);
+    }
+    return round2(Number(tx.price) || 0);
+  }
   const lp = Number(tx.listPrice);
   if(Number.isFinite(lp) && lp > 0) return round2(lp);
   return round2(Number(tx.price) || 0);
 }
 function getDisplayLineTotal(tx) {
   if(!tx) return 0;
+  if(tx.type === 'purchase') {
+    return round2((Number(tx.total) || 0) + (Number(tx.lineExtraCost) || 0));
+  }
   const hasBillDiscount = !!tx.billId && Math.abs(Number(tx.lineDiscount) || 0) > 0;
   if(hasBillDiscount && tx.type !== 'return') {
     return round2((Number(tx.qty) || 0) * (Number(getDisplayUnitPrice(tx)) || 0));
@@ -150,13 +179,21 @@ function groupTxnsByBill(txns, mode) {
   });
   groups.forEach(g => {
     g.rows.sort((a,b)=>a.id-b.id);
-    g.total = round2(g.rows.reduce((s, t) => s + (Number(t.total) || 0), 0));
-    const recomputedGross = round2(g.rows.reduce((s, t) => s + getDisplayLineTotal(t), 0));
-    g.grossTotal = recomputedGross;
-    // Always derive visible discount from visible rows to avoid mismatch after returns/deletes.
-    g.discount = round2(Math.max(0, g.grossTotal - g.total));
+    if(mode === 'purchase') {
+      g.productTotal = round2(g.rows.reduce((s, t) => s + (Number(t.total) || 0), 0));
+      g.extraCost = round2(g.rows.reduce((s, t) => s + (Number(t.lineExtraCost) || 0), 0));
+      g.total = round2(g.productTotal + g.extraCost);
+      g.grossTotal = g.total;
+      g.discount = 0;
+    } else {
+      g.total = round2(g.rows.reduce((s, t) => s + (Number(t.total) || 0), 0));
+      const recomputedGross = round2(g.rows.reduce((s, t) => s + getDisplayLineTotal(t), 0));
+      g.grossTotal = recomputedGross;
+      // Always derive visible discount from visible rows to avoid mismatch after returns/deletes.
+      g.discount = round2(Math.max(0, g.grossTotal - g.total));
+    }
     if(mode === 'sale') {
-      const grossProfit = round2(g.rows.reduce((s, t) => s + round2((Number(t.total) || 0) - (Number(t.cost) || 0) * (Number(t.qty) || 0)), 0));
+      const grossProfit = round2(g.rows.reduce((s, t) => s + round2((Number(t.total) || 0) - (typeof getSaleCostTotal === 'function' ? getSaleCostTotal(t) : round2((Number(t.cost) || 0) * (Number(t.qty) || 0)))), 0));
       const rowIds = new Set(g.rows.map(r => String(r.id)));
       const linkedReturns = (data.transactions || []).filter(t =>
         t &&
@@ -202,7 +239,7 @@ function groupReturnTxns(txns) {
 
 function txReturnGroupRow(g) {
   if(g.rows.length === 1 && !g.returnGroupId) return txRow(g.rows[0]);
-  const dt = dateToYMDLocal(g.date) || '-';
+  const dt = displayDateTime(g.date) || dateToYMDLocal(g.date) || '-';
   const metaParts = [`${g.rows.length} item${g.rows.length>1?'s':''}`, `Date: ${dt}`];
   if(g.returnGroupId) metaParts.push(`Return ID: ${g.returnGroupId}`);
   if(g.sourceBillId) metaParts.push(`From Bill: ${g.sourceBillId}`);
@@ -242,7 +279,7 @@ function txReturnGroupRow(g) {
 function txGroupRow(g, opts = {}) {
   const showBillProfit = !!opts.showBillProfit;
   if(g.rows.length === 1 && !g.billId) return txRow(g.rows[0]);
-  const dt = dateToYMDLocal(g.date);
+  const dt = displayDateTime(g.date) || dateToYMDLocal(g.date);
   const partyLabel = g.party ? (g.mode === 'sale' ? 'Customer' : 'Supplier') : '';
   const items = g.rows.map(r => txRow(r, { suppressPartyBadge: true, suppressInvoiceButton: true })).join('');
   const metaParts = [`${g.rows.length} item${g.rows.length>1?'s':''}`, `Date: ${dt}`];
@@ -255,6 +292,9 @@ function txGroupRow(g, opts = {}) {
     : '';
   const discountLine = (g.billId && (Number(g.discount) || 0) > 0)
     ? `<div style="font-size:0.72rem;color:var(--ink2);margin-top:1px">SubTotal: ${fmt(g.grossTotal)} · Discount: -${fmt(g.discount)}</div>`
+    : '';
+  const purchaseExtraLine = (g.mode === 'purchase' && (Number(g.extraCost) || 0) > 0)
+    ? `<div style="font-size:0.72rem;color:var(--ink2);margin-top:1px">Product: ${fmt(g.productTotal)} + Extra Costing: ${fmt(g.extraCost)}</div>`
     : '';
   const netAfterReturnLine = (g.mode === 'sale' && (Number(g.returnedQty) || 0) > 0)
     ? `<div style="font-size:0.72rem;color:var(--ink2);margin-top:1px">Net after return: ${fmt(g.netAfterReturn)} (Returned ${fmt(g.returnedTotal)})</div>`
@@ -269,9 +309,10 @@ function txGroupRow(g, opts = {}) {
       <div style="text-align:right">
         <div style="font-size:0.9rem;font-weight:700;color:var(--gold)">${(g.billId && (Number(g.discount)||0)>0) ? 'Total after discount' : 'Total'}: ${fmt(g.total)}</div>
         ${discountLine}
+        ${purchaseExtraLine}
         ${netAfterReturnLine}
         ${profitLine}
-        ${''}
+        ${g.billId ? `<button class="del-btn" style="color:var(--blue);opacity:0.75" onclick='openInvoiceFromGroup(${JSON.stringify(g.mode)}, ${JSON.stringify(g.billId)}, ${JSON.stringify(g.rows[0]?.id || '')})' title="Print invoice">Invoice</button>` : ''}
       </div>
     </div>
     ${items}

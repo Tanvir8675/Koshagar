@@ -5,8 +5,13 @@
   "type": "module",
   "description": "KoshAgar shop manager — build step obfuscates the app into dist/ for deployment.",
   "scripts": {
+    "start": "node ./backend/server.js",
     "build": "node frontend/build.mjs",
-    "backend": "node ./backend/server.js"
+    "backend": "node ./backend/server.js",
+    "frontend": "node tools/local-static-server.cjs"
+  },
+  "engines": {
+    "node": "24.x"
   },
   "devDependencies": {
     "javascript-obfuscator": "^4.1.1"

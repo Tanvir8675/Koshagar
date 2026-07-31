@@ -1,15 +1,10 @@
-// modules/invoice.js — Invoice building / rendering / printing
-// Phase 3 extraction. Classic script sharing index.html's global scope; loaded
-// after the main script. Runtime-only (invoked from buttons), so load order is
-// safe. Depends on globals: data, dateToYMDLocal, todayStr, makeTimeId,
-// getTxCustomerName, getTxSupplierName, normalizePhone, round2,
-// getDisplayUnitPrice, getShopName, getShopAddress, getShopMobile, getProd,
-// fmt, toast, activeInvoiceHtml.
+// modules/invoice.js - Invoice building / rendering / printing
+// Classic script sharing index.html's global scope.
 
 function buildInvoiceNo(tx) {
-  if(tx?.billId) return `INV-${String(tx.billId).replace(/\s+/g,'')}`;
+  if(tx?.billId) return `INV-${String(tx.billId).replace(/\s+/g, '')}`;
   const dt = dateToYMDLocal(tx?.date || new Date()) || todayStr();
-  return `INV-${dt.replace(/-/g,'')}-${String(tx?.id || makeTimeId())}`;
+  return `INV-${dt.replace(/-/g, '')}-${String(tx?.id || makeTimeId())}`;
 }
 
 function getInvoiceLinesForTx(tx) {
@@ -17,55 +12,95 @@ function getInvoiceLinesForTx(tx) {
   if(tx.billId && (tx.type === 'sale' || tx.type === 'purchase')) {
     return (data.transactions || [])
       .filter(t => t.type === tx.type && String(t.billId || '') === String(tx.billId))
-      .sort((a,b)=>(Number(a.id)||0)-(Number(b.id)||0));
+      .sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
   }
   return [tx];
+}
+
+function getTxCustomerPhoneForInvoice(tx) {
+  const direct = normalizePhone(tx?.customerPhone || '');
+  if(direct) return direct;
+  let credit = (data.credits || []).find(c => String(c.txId) === String(tx?.id));
+  if(!credit && tx?.billId) {
+    credit = (data.credits || []).find(c => String(c.billId || '') === String(tx.billId));
+  }
+  if(!credit) {
+    credit = (data.credits || []).find(c => Array.isArray(c.txIds) && c.txIds.some(id => String(id) === String(tx?.id)));
+  }
+  return normalizePhone(credit?.customerPhone || '');
+}
+
+function getTxSupplierPhoneForInvoice(tx) {
+  const direct = normalizePhone(tx?.supplierPhone || '');
+  if(direct) return direct;
+  let sc = (data.supplierCredits || []).find(s => String(s.txId) === String(tx?.id));
+  if(!sc && tx?.billId) {
+    sc = (data.supplierCredits || []).find(s => String(s.billId || '') === String(tx.billId));
+  }
+  if(!sc) {
+    sc = (data.supplierCredits || []).find(s => Array.isArray(s.txIds) && s.txIds.some(id => String(id) === String(tx?.id)));
+  }
+  return normalizePhone(sc?.supplierPhone || '');
 }
 
 function buildInvoicePayloadFromTx(tx) {
   const lines = getInvoiceLinesForTx(tx);
   if(!lines.length) return null;
+
   const first = lines[0];
   const type = first.type === 'purchase' ? 'purchase' : 'sale';
   const customerName = type === 'sale' ? getTxCustomerName(first) : '';
-  const customerPhone = type === 'sale' ? normalizePhone(first.customerPhone || '') : '';
+  const customerPhone = type === 'sale' ? getTxCustomerPhoneForInvoice(first) : '';
   const supplierName = type === 'purchase' ? getTxSupplierName(first) : '';
-  const derivedTotal = round2(lines.reduce((s,l)=>s+(Number(l.total)||0),0));
-  const derivedSubTotal = round2(lines.reduce((s,l)=>s + round2((Number(getDisplayUnitPrice(l)) || 0) * (Number(l.qty) || 0)), 0));
+  const supplierPhone = type === 'purchase' ? getTxSupplierPhoneForInvoice(first) : '';
+  const derivedTotal = round2(lines.reduce((s, l) => s + (Number(l.total) || 0), 0));
+  const derivedSubTotal = round2(lines.reduce((s, l) => s + round2((Number(getDisplayUnitPrice(l)) || 0) * (Number(l.qty) || 0)), 0));
   const hasBillMeta = !!first.billId &&
     Number.isFinite(Number(first.billGrossTotal)) &&
     Number.isFinite(Number(first.billDiscountTotal)) &&
     Number.isFinite(Number(first.billNetTotal));
   const hasPaidMeta = hasBillMeta && Number.isFinite(Number(first.billPaidTotal));
   const subTotal = hasBillMeta ? round2(Number(first.billGrossTotal) || 0) : derivedSubTotal;
-  const discount = hasBillMeta ? round2(Math.max(0, Number(first.billDiscountTotal) || 0)) : round2(Math.max(0, derivedSubTotal - derivedTotal));
+  const discount = type === 'sale'
+    ? (hasBillMeta ? round2(Math.max(0, Number(first.billDiscountTotal) || 0)) : round2(Math.max(0, derivedSubTotal - derivedTotal)))
+    : 0;
   const total = hasBillMeta ? round2(Number(first.billNetTotal) || 0) : derivedTotal;
-  const costTotal = type === 'sale'
-    ? round2(lines.reduce((s,l)=>s + round2((Number(l.cost)||0) * (Number(l.qty)||0)), 0))
-    : round2(lines.reduce((s,l)=>s + round2((Number(l.price)||0) * (Number(l.qty)||0)), 0));
-  const profit = type === 'sale' ? round2(total - costTotal) : 0;
-  let paid = hasPaidMeta ? round2(Number(first.billPaidTotal) || 0) : round2(lines.reduce((s,l)=>s + (Number(l.cashPaid)||0),0));
+  let paid = hasPaidMeta ? round2(Number(first.billPaidTotal) || 0) : round2(lines.reduce((s, l) => s + (Number(l.cashPaid) || 0), 0));
   if(Math.abs(total - paid) <= 0.1) paid = total;
   const due = Math.max(0, round2(total - paid));
   const date = dateToYMDLocal(first.date) || todayStr();
-  const time = new Date(first.date || Date.now()).toLocaleTimeString('en',{hour:'2-digit',minute:'2-digit'});
+  const dateTime = formatInvoiceDateTime(first.date || date);
+
   return {
     invoiceNo: buildInvoiceNo(first),
     type,
     billId: first.billId || '',
     date,
-    time,
+    dateTime,
     customerName,
     customerPhone,
     supplierName,
+    supplierPhone,
     lines,
     subTotal,
     discount,
     total,
     paid,
-    due,
-    profit
+    due
   };
+}
+
+function formatInvoiceDateTime(dateLike) {
+  const date = new Date(dateLike || Date.now());
+  if(Number.isNaN(date.getTime())) return '';
+  const dd = String(date.getDate()).padStart(2, '0');
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const yyyy = date.getFullYear();
+  let hour = date.getHours();
+  const minute = String(date.getMinutes()).padStart(2, '0');
+  const ampm = hour >= 12 ? 'pm' : 'am';
+  hour = hour % 12 || 12;
+  return `${dd}-${mm}-${yyyy} ${hour}:${minute}${ampm}`;
 }
 
 function renderInvoiceHtml(inv) {
@@ -73,76 +108,110 @@ function renderInvoiceHtml(inv) {
   const shopName = getShopName();
   const shopAddress = getShopAddress();
   const shopMobile = getShopMobile();
+  const logoSrc = new URL('./icons/icon_192.png', window.location.href).href;
+  const partyName = inv.type === 'sale' ? (inv.customerName || 'Walk-in') : (inv.supplierName || 'Unknown Supplier');
+  const partyPhone = inv.type === 'sale' ? (inv.customerPhone || '') : (inv.supplierPhone || '');
   const rows = inv.lines.map((l, i) => {
     const p = getProd(l.productId);
     const unitPrice = round2(Number(getDisplayUnitPrice(l)) || 0);
-    const grossLineTotal = round2((Number(l.qty) || 0) * unitPrice);
+    const lineTotal = round2((Number(l.qty) || 0) * unitPrice);
     return `<tr>
-      <td style="padding:6px;border:1px solid #222;vertical-align:top">${i+1}</td>
-      <td style="padding:6px;border:1px solid #222;vertical-align:top">${p?.name || '?'}</td>
-      <td style="padding:6px;border:1px solid #222;vertical-align:top;text-align:center">${round2(l.qty)} ${p?.unit || ''}</td>
-      <td style="padding:6px;border:1px solid #222;vertical-align:top;text-align:right">${fmt(unitPrice)}</td>
-      <td style="padding:6px;border:1px solid #222;vertical-align:top;text-align:right;font-weight:700">${fmt(grossLineTotal)}</td>
+      <td style="height:17px;padding:2px 5px;border:1px solid #111;text-align:center;vertical-align:middle">${i + 1}</td>
+      <td style="height:17px;padding:2px 5px;border:1px solid #111;vertical-align:middle">${escapeHtml(p?.name || '?')}</td>
+      <td style="height:17px;padding:2px 5px;border:1px solid #111;text-align:center;vertical-align:middle">${escapeHtml(`${round2(l.qty)} ${p?.unit || ''}`.trim())}</td>
+      <td style="height:17px;padding:2px 5px;border:1px solid #111;text-align:center;vertical-align:middle">${fmt(unitPrice)}</td>
+      <td style="height:17px;padding:2px 5px;border:1px solid #111;text-align:center;vertical-align:middle">${fmt(lineTotal)}</td>
     </tr>`;
   }).join('');
-  const partyTitle = inv.type === 'sale' ? 'Invoice To' : 'Vendor';
-  const partyName = inv.type === 'sale' ? (inv.customerName || 'Walk-in') : (inv.supplierName || 'Unknown Supplier');
-  const partyPhone = inv.type === 'sale' ? (inv.customerPhone || '') : '';
-  return `<div id="printInvoiceRoot" style="font-family:Outfit,sans-serif;color:#111;padding:2px 10px 8px;border-top:4px solid #111">
-    <div style="text-align:center;font-size:1.55rem;letter-spacing:2.6px;font-weight:700;margin:2px 0 3px">INVOICE</div>
-    <div style="text-align:center;font-size:2rem;font-weight:800;text-decoration:underline;line-height:1.08">${shopName}</div>
-    <div style="text-align:center;font-size:0.78rem;color:#555;margin:4px 0 10px">${shopAddress ? `Address: ${shopAddress}` : ''}</div>
-
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px">
-      <div style="border:1px solid #222;padding:8px 10px;font-size:0.9rem;line-height:1.38;border-radius:4px;background:#fcfcfc">
-        <div style="font-weight:700;margin-bottom:2px">${partyTitle}</div>
-        <div><span style="color:#666">Name:</span> ${partyName}</div>
-        <div><span style="color:#666">Address:</span> </div>
-      </div>
-      <div style="border:1px solid #222;padding:8px 10px;font-size:0.9rem;line-height:1.38;border-radius:4px;background:#fcfcfc">
-        <div><span style="color:#666">Invoice ID:</span> ${inv.invoiceNo}</div>
-        <div><span style="color:#666">Bill ID:</span> ${inv.billId || '-'}</div>
-        <div><span style="color:#666">Date:</span> ${inv.date}</div>
-        <div><span style="color:#666">Mobile:</span> ${shopMobile || '-'}</div>
-      </div>
+  return `<div id="printInvoiceRoot" style="font-family:Arial, Helvetica, sans-serif;color:#000;background:#fff;width:190mm;min-height:270mm;margin:0 auto;box-sizing:border-box;padding:22mm 18mm 18mm">
+    <div style="display:grid;grid-template-columns:34mm 1fr 34mm;align-items:start;margin-bottom:6mm">
+      <div><img src="${logoSrc}" alt="Logo" style="width:22mm;height:22mm;object-fit:contain"></div>
+      <div style="text-align:center;font-size:12px;text-decoration:underline;margin-top:1mm">INVOICE</div>
+      <div></div>
     </div>
 
-    <table style="width:100%;border-collapse:collapse;font-size:0.91rem">
+    <table style="border-collapse:collapse;font-size:12px;margin-bottom:0;width:60mm">
+      <tr>
+        <td style="border:1px solid #111;width:30mm;padding:3px 6px">Invoice ID:</td>
+        <td style="border:1px solid #111;width:30mm;padding:3px 6px">Date:</td>
+      </tr>
+      <tr>
+        <td style="border:1px solid #111;padding:3px 6px">${escapeHtml(inv.invoiceNo)}</td>
+        <td style="border:1px solid #111;padding:3px 6px">${escapeHtml(inv.dateTime || inv.date)}</td>
+      </tr>
+    </table>
+
+    <table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:8mm">
+      <tr>
+        <td style="border:1px solid #111;width:50%;padding:3px 6px;vertical-align:top">
+          <div>Bill to:</div>
+          <div>Customer Name: ${escapeHtml(partyName)}</div>
+          <div>Address</div>
+          <div>Mobile No: ${escapeHtml(partyPhone || '')}</div>
+        </td>
+        <td style="border:1px solid #111;width:50%;padding:3px 6px;vertical-align:top">
+          <div style="text-decoration:underline">${escapeHtml(shopName)}</div>
+          <div>Address: ${escapeHtml(shopAddress || '')}</div>
+          <div>Mobile No: ${escapeHtml(shopMobile || '')}</div>
+        </td>
+      </tr>
+    </table>
+
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
       <thead>
         <tr>
-          <th style="text-align:center;padding:6px;border:1px solid #222;width:54px;background:#efefef">SL. No</th>
-          <th style="text-align:center;padding:6px;border:1px solid #222;background:#efefef">Product Name</th>
-          <th style="text-align:center;padding:6px;border:1px solid #222;width:120px;background:#efefef">Qty</th>
-          <th style="text-align:center;padding:6px;border:1px solid #222;width:140px;background:#efefef">Unit Price</th>
-          <th style="text-align:center;padding:6px;border:1px solid #222;width:140px;background:#efefef">Total</th>
+          <th style="text-align:center;padding:3px;border:1px solid #111;width:12mm;font-weight:400">Ser<br>No</th>
+          <th style="text-align:center;padding:3px;border:1px solid #111;font-weight:400">Product Name</th>
+          <th style="text-align:center;padding:3px;border:1px solid #111;width:30mm;font-weight:400">Qty</th>
+          <th style="text-align:center;padding:3px;border:1px solid #111;width:30mm;font-weight:400">Unit Price<br>(BDT)</th>
+          <th style="text-align:center;padding:3px;border:1px solid #111;width:30mm;font-weight:400">Total<br>(BDT)</th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>
 
-    <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-top:10px;gap:12px">
-      <div style="font-size:0.9rem;min-width:260px">
-        Signature: __________________
+    <div style="display:grid;grid-template-columns:1fr 50mm;margin-top:10mm">
+      <div></div>
+      <div style="border:1px solid #111;font-size:12px;padding:4px 7px;line-height:1.42">
+        <div>Sub Total: ${fmt(inv.subTotal || inv.total)}</div>
+        <div>Discount: ${fmt(inv.discount || 0)}</div>
+        <div>Total after Discount: ${fmt(inv.total)}</div>
+        <div>Paid: ${fmt(inv.paid)}</div>
+        <div>Due: ${fmt(inv.due)}</div>
       </div>
-      <div style="min-width:310px;font-size:0.9rem;line-height:1.38;border:1px solid #222;border-radius:4px;padding:8px 10px;background:#fafafa">
-        <div style="display:flex;justify-content:space-between"><span>Sub Total:</span><span style="font-weight:700">${fmt(inv.subTotal || inv.total)}</span></div>
-        <div style="display:flex;justify-content:space-between"><span>Discount:</span><span>${fmt(inv.discount || 0)}</span></div>
-        <div style="display:flex;justify-content:space-between"><span>Total after discount:</span><span style="font-weight:700">${fmt(inv.total)}</span></div>
-        <div style="display:flex;justify-content:space-between"><span>Paid:</span><span>${fmt(inv.paid)}</span></div>
-        <div style="display:flex;justify-content:space-between;border-top:1px dashed #bbb;margin-top:4px;padding-top:4px"><span style="font-weight:700">Due:</span><span style="font-weight:800">${fmt(inv.due)}</span></div>
-      </div>
+    </div>
+
+    <div style="margin-top:20mm;font-size:12px;width:36mm;text-align:left">
+      <div style="border-top:2px solid #111;width:34mm;margin-bottom:2mm"></div>
+      <div>Authorized Signature</div>
     </div>
   </div>`;
 }
 
+function showInvoice(inv) {
+  if(!inv) { toast('No invoice to print'); return; }
+  activeInvoiceHtml = renderInvoiceHtml(inv);
+  const overlay = document.getElementById('invoiceModalOverlay');
+  const modal = document.getElementById('invoiceModal');
+  const sub = document.getElementById('invoiceModalSub');
+  const preview = document.getElementById('invoicePreview');
+  if(sub) sub.textContent = `${inv.invoiceNo} - ${inv.dateTime || inv.date}`;
+  if(preview) preview.innerHTML = activeInvoiceHtml;
+  if(overlay) overlay.classList.add('active');
+  if(modal) modal.style.display = 'block';
+}
+
 function openInvoiceFromTx(txId) {
-  toast('ℹ️ Invoice printing is not available in this version.');
-  return;
+  const tx = (data.transactions || []).find(t => String(t.id) === String(txId));
+  showInvoice(buildInvoicePayloadFromTx(tx));
 }
 
 function openInvoiceFromGroup(mode, billId, seedTxId) {
-  toast('ℹ️ Invoice printing is not available in this version.');
-  return;
+  const tx = (data.transactions || []).find(t =>
+    String(t.billId || '') === String(billId || '') &&
+    (!mode || String(t.type) === String(mode))
+  ) || (data.transactions || []).find(t => String(t.id) === String(seedTxId));
+  showInvoice(buildInvoicePayloadFromTx(tx));
 }
 
 function closeInvoiceModal() {
@@ -151,20 +220,14 @@ function closeInvoiceModal() {
 }
 
 function printInvoice() {
-  if(!activeInvoiceHtml) { toast('⚠️ No invoice to print'); return; }
+  if(!activeInvoiceHtml) { toast('No invoice to print'); return; }
   const w = window.open('', '_blank');
-  if(!w) { toast('⚠️ Your browser blocked the print window. Please allow pop-ups and try again.'); return; }
+  if(!w) { toast('Your browser blocked the print window. Please allow pop-ups and try again.'); return; }
   w.document.write(`<html><head><title>Invoice</title>
     <style>
-      @page { size: A4 portrait; margin: 10mm; }
+      @page { size: A4 portrait; margin: 0; }
       html, body { margin: 0; padding: 0; background: #fff; }
-      body { font-family: Outfit, Arial, sans-serif; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-      #printInvoiceRoot {
-        width: 190mm;
-        min-height: 0;
-        margin: 0 auto;
-        box-sizing: border-box;
-      }
+      body { font-family: Arial, Helvetica, sans-serif; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
       table { page-break-inside: auto; }
       tr { page-break-inside: avoid; page-break-after: auto; }
       thead { display: table-header-group; }

@@ -1,7 +1,7 @@
 // modules/cashbook.js — Cash withdrawals (owner drawings)
 // Phase 3 extraction. Classic script (loads over file:// and http), shares the
 // global scope of index.html. Depends on globals defined there: data, round2,
-// fmt, toast, todayStr, requireMonthUnlockOverride, runEngineCommand,
+// fmt, toast, todayStr, displayDateOnly, readAppDateValue, setAppDateValue, requireMonthUnlockOverride, runEngineCommand,
 // buildFinancialView, showPage. Loaded after the main script, before bootstrap.
 
 // ── CASH WITHDRAWALS (owner drawings) ────────────────────────────
@@ -28,7 +28,7 @@ function startEditWithdrawal(id) {
     const cancel   = document.getElementById('withdrawalCancelBtn');
     if(amtEl)    amtEl.value    = w.amount;
     if(reasonEl) reasonEl.value = w.reason;
-    if(dateEl)   dateEl.value   = w.date;
+    if(dateEl)   setAppDateValue(dateEl, w.date);
     if(btn)      { btn.textContent = '✔ Update'; btn.style.background = 'var(--blue)'; }
     if(cancel)   cancel.style.display = 'inline-block';
     amtEl?.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -45,7 +45,7 @@ function cancelEditWithdrawal() {
   const cancel   = document.getElementById('withdrawalCancelBtn');
   if(amtEl)    amtEl.value    = '';
   if(reasonEl) reasonEl.value = '';
-  if(dateEl)   dateEl.value   = todayStr();
+  if(dateEl)   setAppDateValue(dateEl);
   if(btn)      { btn.textContent = '+ Add'; btn.style.background = 'var(--ink)'; }
   if(cancel)   cancel.style.display = 'none';
 }
@@ -57,7 +57,7 @@ async function addCashWithdrawal() {
   const amt = parseFloat(amtEl?.value);
   if(!amt || amt <= 0) { toast('⚠️ Enter a valid amount'); return; }
   const reason = reasonEl?.value?.trim() || 'Cash withdrawal';
-  const date = dateEl?.value || todayStr();
+  const date = readAppDateValue(dateEl);
   if(!(await requireMonthUnlockOverride(date, editingWithdrawalId ? 'withdrawal edit' : 'withdrawal add'))) return;
   const cashNow = round2(buildFinancialView('daily', date).cashInHand || 0);
   if(round2(amt) > cashNow + 0.01) {

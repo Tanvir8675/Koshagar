@@ -6,30 +6,112 @@
 // pure helpers (round2, buildPeriodMatcher, getNetTxView, getReturnCost,
 // getCreditDueAsOf, getSupplierDueAsOf, getCreditDue, getStock, getProd,
 // getOpeningCashForDate, getTotalInventoryValueAsOf, getPeriodStartDate,
+// getPeriodEndDate,
 // groupTxnsByBill, groupReturnTxns, isLinkedReturnTx, buildCreditMetrics,
 // todayStr). No DOM access.
 
 // ===== KoshCalc — isolated financial calculation namespace (Phase 1) =====
 var KoshCalc = window.KoshCalc || (window.KoshCalc = {});
 
+function saleCostTotal(t) {
+  if(typeof getSaleCostTotal === 'function') return getSaleCostTotal(t);
+  const exact = Number(t && t.costTotal);
+  if(Number.isFinite(exact) && exact >= 0) return round2(exact);
+  return round2((Number(t && t.cost) || 0) * (Number(t && t.qty) || 0));
+}
+
+function returnCostTotal(t) {
+  if(typeof getReturnCostTotal === 'function') return getReturnCostTotal(t);
+  return round2(getReturnCost(t) * (Number(t && t.qty) || 0));
+}
+
+KoshCalc._loadPeriodTransactionsFromSqlite = function(periodType, periodDate) {
+  try {
+    if(!window.KoshDB || !KoshDB.available || !KoshDB.hasBusinessData()) return null;
+    const badDate = KoshDB.query("SELECT COUNT(*) FROM transactions WHERE local_date IS NULL OR local_date NOT GLOB '????-??-??'");
+    const badDateCount = badDate && badDate[0] && badDate[0].values && badDate[0].values[0] ? Number(badDate[0].values[0][0]) || 0 : 0;
+    if(badDateCount > 0) return null;
+
+    let startYmd = getPeriodStartDate(periodType, periodDate);
+    let endYmd = typeof getPeriodEndDate === 'function' ? getPeriodEndDate(periodType, periodDate) : (periodDate || todayStr());
+    if(!startYmd || !endYmd) return null;
+    if(startYmd > endYmd) { const tmp = startYmd; startYmd = endYmd; endYmd = tmp; }
+
+    const res = KoshDB.query(
+      `SELECT json FROM transactions
+       WHERE local_date >= ? AND local_date <= ?
+         AND type IN ('sale','purchase','return','adjustment','capital-in','capital-out')
+       ORDER BY local_date ASC, id ASC`,
+      [startYmd, endYmd]
+    );
+    if(!res || !res[0]) return [];
+    const out = [];
+    for(const row of res[0].values || []) {
+      try { out.push(JSON.parse(row[0])); } catch(_) {}
+    }
+    return out;
+  } catch(_) {
+    return null;
+  }
+};
+
+KoshCalc._loadPeriodJsonRowsFromSqlite = function(table, periodType, periodDate) {
+  const allowed = {
+    credits: true,
+    payments: true,
+    supplier_credits: true,
+    supplier_payments: true,
+    extra_expenses: true,
+    cash_withdrawals: true
+  };
+  if(!allowed[table]) return null;
+  try {
+    if(!window.KoshDB || !KoshDB.available || !KoshDB.hasBusinessData()) return null;
+    const badDate = KoshDB.query(`SELECT COUNT(*) FROM ${table} WHERE local_date IS NULL OR local_date NOT GLOB '????-??-??'`);
+    const badDateCount = badDate && badDate[0] && badDate[0].values && badDate[0].values[0] ? Number(badDate[0].values[0][0]) || 0 : 0;
+    if(badDateCount > 0) return null;
+
+    let startYmd = getPeriodStartDate(periodType, periodDate);
+    let endYmd = typeof getPeriodEndDate === 'function' ? getPeriodEndDate(periodType, periodDate) : (periodDate || todayStr());
+    if(!startYmd || !endYmd) return null;
+    if(startYmd > endYmd) { const tmp = startYmd; startYmd = endYmd; endYmd = tmp; }
+
+    const res = KoshDB.query(
+      `SELECT json FROM ${table}
+       WHERE local_date >= ? AND local_date <= ?
+       ORDER BY local_date ASC, id ASC`,
+      [startYmd, endYmd]
+    );
+    if(!res || !res[0]) return [];
+    const out = [];
+    for(const row of res[0].values || []) {
+      try { out.push(JSON.parse(row[0])); } catch(_) {}
+    }
+    return out;
+  } catch(_) {
+    return null;
+  }
+};
+
 KoshCalc._computeFinancialSnapshotUncached = function(periodType, periodDate) {
   const inPeriod = buildPeriodMatcher(periodType, periodDate);
-  const cutoffYmd = periodDate || todayStr();
-  const salesRaw = data.transactions.filter(t => t.type === 'sale' && inPeriod(t.date));
-  const purchasesRaw = data.transactions.filter(t => t.type === 'purchase' && !t.opening && inPeriod(t.date));
-  const saleReturnsRaw = data.transactions.filter(t =>
+  const cutoffYmd = typeof getPeriodEndDate === 'function' ? getPeriodEndDate(periodType, periodDate) : (periodDate || todayStr());
+  const periodTransactions = KoshCalc._loadPeriodTransactionsFromSqlite(periodType, periodDate) || data.transactions;
+  const sqlPeriodScoped = periodTransactions !== data.transactions;
+  const periodTx = sqlPeriodScoped ? periodTransactions : data.transactions.filter(t => inPeriod(t.date));
+  const salesRaw = periodTx.filter(t => t.type === 'sale');
+  const purchasesRaw = periodTx.filter(t => t.type === 'purchase' && !t.opening);
+  const saleReturnsRaw = periodTx.filter(t =>
     t.type === 'return' &&
-    (t.returnType === 'sale-return' || !t.returnType) &&
-    inPeriod(t.date)
+    (t.returnType === 'sale-return' || !t.returnType)
   );
-  const purchaseReturnsRaw = data.transactions.filter(t =>
+  const purchaseReturnsRaw = periodTx.filter(t =>
     t.type === 'return' &&
-    t.returnType === 'purchase-return' &&
-    inPeriod(t.date)
+    t.returnType === 'purchase-return'
   );
-  const capitalInRaw = data.transactions.filter(t => t.type === 'capital-in' && !t.seedOpening && inPeriod(t.date));
-  const capitalOutRaw = data.transactions.filter(t => t.type === 'capital-out' && inPeriod(t.date));
-  const adjustmentsRaw = data.transactions.filter(t => t.type === 'adjustment' && inPeriod(t.date));
+  const capitalInRaw = periodTx.filter(t => t.type === 'capital-in' && !t.seedOpening);
+  const capitalOutRaw = periodTx.filter(t => t.type === 'capital-out');
+  const adjustmentsRaw = periodTx.filter(t => t.type === 'adjustment');
   const salesNet = salesRaw.map(getNetTxView).filter(t => t.qty > 0.0001);
   const purchasesNet = purchasesRaw.map(getNetTxView).filter(t => t.qty > 0.0001);
 
@@ -40,8 +122,8 @@ KoshCalc._computeFinancialSnapshotUncached = function(periodType, periodDate) {
   // Period-consistent net sales: only current-period sale minus current-period sale return.
   const netRevenue = round2(grossSalesRevenue - saleReturnRevenue);
 
-  const grossSalesCost = round2(salesRaw.reduce((s, t) => s + round2((Number(t.cost) || 0) * (Number(t.qty) || 0)), 0));
-  const saleReturnCost = round2(saleReturnsRaw.reduce((s, t) => s + round2(getReturnCost(t) * (Number(t.qty) || 0)), 0));
+  const grossSalesCost = round2(salesRaw.reduce((s, t) => s + saleCostTotal(t), 0));
+  const saleReturnCost = round2(saleReturnsRaw.reduce((s, t) => s + returnCostTotal(t), 0));
   const netCost = round2(grossSalesCost - saleReturnCost);
   // Stock adjustment losses (damage/theft/correction): user-stated value × qty.
   const adjustmentLossTotal = round2(adjustmentsRaw.reduce((s, t) => s + round2((Number(t.cost) || 0) * (Number(t.qty) || 0)), 0));
@@ -52,18 +134,22 @@ KoshCalc._computeFinancialSnapshotUncached = function(periodType, periodDate) {
   const saleReturnCashOut = round2(saleReturnsRaw.reduce((s, t) => s + (t.cashPaid !== undefined ? t.cashPaid : t.total), 0));
   const cashSales = round2(saleCashIn - saleReturnCashOut);
 
-  const periodCredits = data.credits.filter(c => inPeriod(c.date));
+  const periodCredits = KoshCalc._loadPeriodJsonRowsFromSqlite('credits', periodType, periodDate) || data.credits.filter(c => inPeriod(c.date));
+  const periodPayments = KoshCalc._loadPeriodJsonRowsFromSqlite('payments', periodType, periodDate) || data.payments.filter(p => inPeriod(p.date));
+  const periodSupplierCredits = KoshCalc._loadPeriodJsonRowsFromSqlite('supplier_credits', periodType, periodDate) || (data.supplierCredits || []).filter(sc => inPeriod(sc.date));
+  const periodSupplierPayments = KoshCalc._loadPeriodJsonRowsFromSqlite('supplier_payments', periodType, periodDate) || (data.supplierPayments || []).filter(sp => inPeriod(sp.date));
   const periodCreditGiven = round2(periodCredits.reduce((s, c) => s + (Number(c.total) || 0), 0));
   const periodCreditPaidNow = round2(periodCredits.reduce((s, c) => s + (Number(c.paid) || 0), 0));
   const periodCreditDue = round2(periodCredits.reduce((s, c) => s + getCreditDueAsOf(c, cutoffYmd), 0));
-  const periodPaymentsReceived = round2(data.payments.filter(p => inPeriod(p.date)).reduce((s, p) => s + (Number(p.amount) || 0), 0));
+  const periodPaymentsReceived = round2(periodPayments.reduce((s, p) => s + (Number(p.amount) || 0), 0));
 
   const purchaseCashPaid = round2(purchasesRaw.reduce((s, t) => s + (t.cashPaid !== undefined ? t.cashPaid : t.total), 0));
-  const supplierDuePaidCashOut = round2((data.supplierPayments || []).filter(sp => inPeriod(sp.date)).reduce((s, sp) => s + (Number(sp.amount) || 0), 0));
+  const purchaseExtraCostCashOut = round2(purchasesRaw.reduce((s, t) => s + (Number(t.lineExtraCost) || 0), 0));
+  const supplierDuePaidCashOut = round2(periodSupplierPayments.reduce((s, sp) => s + (Number(sp.amount) || 0), 0));
   const purchaseReturnCashIn = round2(purchaseReturnsRaw.reduce((s, t) => s + (t.cashPaid !== undefined ? t.cashPaid : t.total), 0));
-  const purchaseCashOut = round2(purchaseCashPaid + supplierDuePaidCashOut - purchaseReturnCashIn);
+  const purchaseCashOut = round2(purchaseCashPaid + purchaseExtraCostCashOut + supplierDuePaidCashOut - purchaseReturnCashIn);
   const netPurchaseValue = round2(
-    purchasesRaw.reduce((s, t) => s + (Number(t.total) || 0), 0)
+    purchasesRaw.reduce((s, t) => s + (Number(t.total) || 0) + (Number(t.lineExtraCost) || 0), 0)
     - purchaseReturnsRaw.reduce((s, t) => s + (Number(t.total) || 0), 0)
   );
   const netPurchaseQty = round2(
@@ -71,24 +157,28 @@ KoshCalc._computeFinancialSnapshotUncached = function(periodType, periodDate) {
     - purchaseReturnsRaw.reduce((s, t) => s + (Number(t.qty) || 0), 0)
   );
   const periodSupplierDue = round2(
-    (data.supplierCredits || [])
-      .filter(sc => inPeriod(sc.date))
-      .reduce((s, sc) => s + getSupplierDueAsOf(sc, cutoffYmd), 0)
+    periodSupplierCredits.reduce((s, sc) => s + getSupplierDueAsOf(sc, cutoffYmd), 0)
   );
   const purchaseNetSpendNow = round2(purchaseCashOut + periodSupplierDue);
 
   const customerDueAll = round2((data.credits || []).reduce((s, c) => s + getCreditDueAsOf(c, cutoffYmd), 0));
   const supplierDueAll = round2((data.supplierCredits || []).reduce((s, sc) => s + getSupplierDueAsOf(sc, cutoffYmd), 0));
-  const capitalCashIn = round2(capitalInRaw.reduce((s, t) => s + (Number(t.total) || Number(t.cashPaid) || 0), 0));
+  const investmentInRaw = capitalInRaw.filter(t => String(t.capitalSource || 'investment') !== 'loan');
+  const loanInRaw = capitalInRaw.filter(t => String(t.capitalSource || '') === 'loan');
+  const investmentCashIn = round2(investmentInRaw.reduce((s, t) => s + (Number(t.total) || Number(t.cashPaid) || 0), 0));
+  const loanCashIn = round2(loanInRaw.reduce((s, t) => s + (Number(t.total) || Number(t.cashPaid) || 0), 0));
+  const capitalCashIn = round2(investmentCashIn + loanCashIn);
   const capitalCashOut = round2(capitalOutRaw.reduce((s, t) => s + (Number(t.total) || Number(t.cashPaid) || 0), 0));
-  const extraExpensesTotal = round2((data.extraExpenses || []).filter(e => inPeriod(e.date)).reduce((s, e) => s + (Number(e.amount) || 0), 0));
-  const extraExpensesList = (data.extraExpenses || []).filter(e => inPeriod(e.date));
+  const extraExpensesList = KoshCalc._loadPeriodJsonRowsFromSqlite('extra_expenses', periodType, periodDate) || (data.extraExpenses || []).filter(e => inPeriod(e.date));
+  const extraExpensesTotal = round2(extraExpensesList.reduce((s, e) => s + (Number(e.amount) || 0), 0));
   // Owner cash withdrawals (drawings): reduce cash-in-hand, NOT profit.
-  const cashWithdrawalsTotal = round2((data.cashWithdrawals || []).filter(w => inPeriod(w.date)).reduce((s, w) => s + (Number(w.amount) || 0), 0));
-  const cashWithdrawalsList = (data.cashWithdrawals || []).filter(w => inPeriod(w.date));
-  const netCashDelta = round2(saleCashIn + periodPaymentsReceived + purchaseReturnCashIn + capitalCashIn - purchaseCashPaid - saleReturnCashOut - supplierDuePaidCashOut - capitalCashOut - extraExpensesTotal - cashWithdrawalsTotal);
+  const cashWithdrawalsList = KoshCalc._loadPeriodJsonRowsFromSqlite('cash_withdrawals', periodType, periodDate) || (data.cashWithdrawals || []).filter(w => inPeriod(w.date));
+  const cashWithdrawalsTotal = round2(cashWithdrawalsList.reduce((s, w) => s + (Number(w.amount) || 0), 0));
+  const loanPaymentsList = KoshCalc._loadPeriodJsonRowsFromSqlite('loan_payments', periodType, periodDate) || (data.loanPayments || []).filter(lp => inPeriod(lp.date));
+  const loanPaymentCashOut = round2(loanPaymentsList.reduce((s, lp) => s + (Number(lp.amount) || 0), 0));
+  const netCashDelta = round2(saleCashIn + periodPaymentsReceived + purchaseReturnCashIn + capitalCashIn - purchaseCashPaid - purchaseExtraCostCashOut - saleReturnCashOut - supplierDuePaidCashOut - capitalCashOut - extraExpensesTotal - cashWithdrawalsTotal - loanPaymentCashOut);
   const totalIncomeBreakdown = round2(saleCashIn + periodPaymentsReceived + purchaseReturnCashIn + capitalCashIn);
-  const totalCostBreakdown = round2(purchaseCashPaid + saleReturnCashOut + supplierDuePaidCashOut + capitalCashOut + extraExpensesTotal + cashWithdrawalsTotal);
+  const totalCostBreakdown = round2(purchaseCashPaid + purchaseExtraCostCashOut + saleReturnCashOut + supplierDuePaidCashOut + capitalCashOut + extraExpensesTotal + cashWithdrawalsTotal + loanPaymentCashOut);
   const purchaseCreditAtBuy = round2(Math.max(0, purchasesRaw.reduce((s, t) => s + (Number(t.total) || 0), 0) - purchaseCashPaid));
 
   return {
@@ -98,6 +188,8 @@ KoshCalc._computeFinancialSnapshotUncached = function(periodType, periodDate) {
     saleReturnsRaw,
     purchaseReturnsRaw,
     capitalInRaw,
+    investmentInRaw,
+    loanInRaw,
     capitalOutRaw,
     adjustmentsRaw,
     salesNet,
@@ -120,8 +212,11 @@ KoshCalc._computeFinancialSnapshotUncached = function(periodType, periodDate) {
     periodPaymentsReceived,
     supplierDuePaidCashOut,
     purchaseCashPaid,
+    purchaseExtraCostCashOut,
     purchaseReturnCashIn,
     capitalCashIn,
+    investmentCashIn,
+    loanCashIn,
     capitalCashOut,
     purchaseCashOut,
     purchaseNetSpendNow,
@@ -137,7 +232,9 @@ KoshCalc._computeFinancialSnapshotUncached = function(periodType, periodDate) {
     extraExpensesTotal,
     extraExpensesList,
     cashWithdrawalsTotal,
-    cashWithdrawalsList
+    cashWithdrawalsList,
+    loanPaymentCashOut,
+    loanPaymentsList
   };
 };
 
@@ -148,11 +245,15 @@ KoshCalc._computeFinancialSnapshotUncached = function(periodType, periodDate) {
 // invalidateCoreCalcState() as a fast path. Returned snapshots are treated
 // as read-only by all callers.
 let __financialSnapshotCache = new Map();
+let __financialViewCache = new Map();
+let __centralBundleCache = new Map();
 
 // Called by the main script's invalidateCoreCalcState() via the global KoshCalc
 // object (load-order-safe — no cross-script `let` reference).
 KoshCalc.invalidateSnapshotCache = function() {
   __financialSnapshotCache.clear();
+  __financialViewCache.clear();
+  __centralBundleCache.clear();
 };
 
 function computeFinancialSignature() {
@@ -172,7 +273,7 @@ function computeFinancialSignature() {
   for (let i = 0; i < txs.length; i++) {
     const t = txs[i];
     feed(t.id); feed(t.type); feed(t.date);
-    feed(t.qty); feed(t.total); feed(t.cost); feed(t.price);
+    feed(t.qty); feed(t.total); feed(t.cost); feed(t.costTotal); feed(t.price);
     feed(t.cashPaid); feed(t.returnType); feed(t.linkedTxId); feed(t.seedOpening); feed(t.opening);
   }
   const credits = data.credits || [];
@@ -218,7 +319,7 @@ function computeFinancialSignature() {
 KoshCalc.computeFinancialSnapshot = function(periodType, periodDate) {
   // Resolve the date exactly as the impl does (periodDate || today) so a cached
   // entry can never survive a midnight rollover and serve a stale "today".
-  const key = computeFinancialSignature() + '|' + (periodType || '') + '|' + (periodDate || todayStr());
+  const key = (window.__dataRevision || 0) + '|' + (periodType || '') + '|' + (periodDate || todayStr());
   const cached = __financialSnapshotCache.get(key);
   if (cached) return cached;
   const result = KoshCalc._computeFinancialSnapshotUncached(periodType, periodDate);
@@ -234,15 +335,19 @@ function computeFinancialSnapshot(periodType, periodDate) {
   return KoshCalc.computeFinancialSnapshot(periodType, periodDate);
 }
 
-KoshCalc.buildFinancialView = function(periodType, periodDate) {
+KoshCalc.buildFinancialView = function(periodType, periodDate, opts = {}) {
+  const includeBusiness = opts.includeBusiness !== false;
+  const viewCacheKey = [periodType || 'daily', periodDate || todayStr(), includeBusiness ? 'business' : 'lean', window.__dataRevision || 0].join('|');
+  const cachedView = __financialViewCache.get(viewCacheKey);
+  if(cachedView) return cachedView;
   const snap = computeFinancialSnapshot(periodType, periodDate);
   const periodStartDate = getPeriodStartDate(periodType, periodDate);
-  const periodEndDate = periodDate || todayStr();
+  const periodEndDate = typeof getPeriodEndDate === 'function' ? getPeriodEndDate(periodType, periodDate) : (periodDate || todayStr());
   const openingCash = getOpeningCashForDate(periodStartDate);
   // Dashboard "Purchased (Cash)" should show period (daily/weekly/monthly/yearly) supplier due, not all-time due.
   const supplierDueOpen = round2(Number(snap.periodSupplierDue) || 0);
   const cashIn = round2(snap.saleCashIn + snap.periodPaymentsReceived + snap.purchaseReturnCashIn + (Number(snap.capitalCashIn) || 0));
-  const cashOut = round2(snap.purchaseCashPaid + snap.saleReturnCashOut + snap.supplierDuePaidCashOut + (Number(snap.capitalCashOut) || 0) + snap.extraExpensesTotal + (Number(snap.cashWithdrawalsTotal) || 0));
+  const cashOut = round2(snap.purchaseCashPaid + (Number(snap.purchaseExtraCostCashOut) || 0) + snap.saleReturnCashOut + snap.supplierDuePaidCashOut + (Number(snap.capitalCashOut) || 0) + snap.extraExpensesTotal + (Number(snap.cashWithdrawalsTotal) || 0) + (Number(snap.loanPaymentCashOut) || 0));
   const totalInWithOpening = round2(openingCash + cashIn);
 
   // Reconciled closing cash: always derived from selected date's daily close,
@@ -252,13 +357,13 @@ KoshCalc.buildFinancialView = function(periodType, periodDate) {
   const cashInHand = round2(endDayOpening + (Number(endDaySnap.netCashDelta) || 0));
 
   const netCashChange = round2(cashInHand - openingCash);
-  const purchaseCashNow = round2(snap.purchaseCashPaid + snap.supplierDuePaidCashOut - round2(snap.purchaseReturnCashIn));
+  const purchaseCashNow = round2(snap.purchaseCashPaid + (Number(snap.purchaseExtraCostCashOut) || 0) + snap.supplierDuePaidCashOut - round2(snap.purchaseReturnCashIn));
   // For report consistency, stock must be valued "as of" selected period end date.
-  const stockValue = round2(getTotalInventoryValueAsOf(periodEndDate));
+  const stockValue = includeBusiness ? round2(getTotalInventoryValueAsOf(periodEndDate)) : 0;
   const customerDueAll = round2(snap.customerDueAll || 0);
   const supplierDueAll = round2(snap.supplierDueAll || 0);
   const netBusinessWorth = round2(cashInHand + stockValue + customerDueAll - supplierDueAll);
-  return {
+  const view = {
     snap,
     openingCash,
     supplierDueOpen,
@@ -273,11 +378,16 @@ KoshCalc.buildFinancialView = function(periodType, periodDate) {
     supplierDueAll,
     netBusinessWorth
   };
+  __financialViewCache.set(viewCacheKey, view);
+  if(__financialViewCache.size > 80) {
+    __financialViewCache.delete(__financialViewCache.keys().next().value);
+  }
+  return view;
 };
 
 // Backward-compatible global shim — existing callers stay untouched.
-function buildFinancialView(periodType, periodDate) {
-  return KoshCalc.buildFinancialView(periodType, periodDate);
+function buildFinancialView(periodType, periodDate, opts = {}) {
+  return KoshCalc.buildFinancialView(periodType, periodDate, opts);
 }
 
 KoshCalc.buildFinancialUiMetrics = function(view) {
@@ -307,6 +417,7 @@ KoshCalc.buildFinancialUiMetrics = function(view) {
       netPurchaseValue: round2(snap.netPurchaseValue || 0),
       netPurchaseQty: round2(snap.netPurchaseQty || 0),
       cashPaidAtBuy: round2(snap.purchaseCashPaid || 0),
+      extraCostCashOut: round2(snap.purchaseExtraCostCashOut || 0),
       supplierDuePaidCashOut: round2(snap.supplierDuePaidCashOut || 0),
       purchaseReturnCashIn: round2(snap.purchaseReturnCashIn || 0),
       cashOutNow: purchaseCashOut,
@@ -325,6 +436,8 @@ KoshCalc.buildFinancialUiMetrics = function(view) {
       periodPaymentsReceived: round2(snap.periodPaymentsReceived || 0),
       purchaseReturnCashIn: round2(snap.purchaseReturnCashIn || 0),
       capitalCashIn: round2(snap.capitalCashIn || 0),
+      investmentCashIn: round2(snap.investmentCashIn || snap.capitalCashIn || 0),
+      loanCashIn: round2(snap.loanCashIn || 0),
       capitalCashOut: round2(snap.capitalCashOut || 0),
       extraExpensesTotal: round2(snap.extraExpensesTotal || 0),
       extraExpensesList: snap.extraExpensesList || [],
@@ -379,11 +492,16 @@ KoshCalc.getCentralCalculationBundle = function(periodType, periodDate, opts = {
   const safeDate = periodDate || todayStr();
   const saleTxQ = String(opts.saleTxQ || '').toLowerCase().trim();
   const purchTxQ = String(opts.purchTxQ || '').toLowerCase().trim();
-  const view = buildFinancialView(safeType, safeDate);
+  const includeBusiness = opts.includeBusiness !== false;
+  const includeOps = opts.includeOps !== false;
+  const cacheKey = [safeType, safeDate, saleTxQ, purchTxQ, includeBusiness ? 'business' : 'lean', includeOps ? 'ops' : 'noops', window.__dataRevision || 0].join('|');
+  const cached = __centralBundleCache.get(cacheKey);
+  if(cached) return cached;
+  const view = KoshCalc.buildFinancialView(safeType, safeDate, { includeBusiness });
   const snap = view.snap;
   const metrics = buildFinancialUiMetrics(view);
   const creditMetrics = buildCreditMetrics(safeType, safeDate);
-  const ops = buildCentralOperationalMetrics(safeType, safeDate, view, metrics);
+  const ops = includeOps ? buildCentralOperationalMetrics(safeType, safeDate, view, metrics) : null;
   // Use the same pre-filtered arrays from the snapshot — single source of truth.
   const saleTxns = (snap.salesRaw || []).filter(t => (Number(t.qty) || 0) > 0.0001);
   const saleRetTxns = snap.saleReturnsRaw || [];
@@ -391,7 +509,7 @@ KoshCalc.getCentralCalculationBundle = function(periodType, periodDate, opts = {
   const purchaseRetTxns = snap.purchaseReturnsRaw || [];
   const saleReportAgg = buildSaleReportAggregates({ txns: saleTxns, retTxnsAll: saleRetTxns, saleTxQ });
   const purchaseReportAgg = buildPurchaseReportAggregates({ txns: purchaseTxns, purchRetTxnsAll: purchaseRetTxns, purchTxQ });
-  return {
+  const bundle = {
     periodType: safeType,
     periodDate: safeDate,
     view,
@@ -406,6 +524,11 @@ KoshCalc.getCentralCalculationBundle = function(periodType, periodDate, opts = {
       purchaseReportAgg
     }
   };
+  __centralBundleCache.set(cacheKey, bundle);
+  if(__centralBundleCache.size > 80) {
+    __centralBundleCache.delete(__centralBundleCache.keys().next().value);
+  }
+  return bundle;
 };
 
 // Backward-compatible global shim — existing callers stay untouched.
@@ -421,7 +544,7 @@ function buildDashboardAggregates({ sales, buys, allReturns }) {
     if(!byCategory[cat]) byCategory[cat] = { qty: 0, revenue: 0, cost: 0 };
     byCategory[cat].qty += t.qty;
     byCategory[cat].revenue += t.total;
-    byCategory[cat].cost += (t.cost || 0) * t.qty;
+    byCategory[cat].cost += saleCostTotal(t);
   });
   allReturns
     .filter(t => (t.returnType === 'sale-return' || !t.returnType))
@@ -431,7 +554,7 @@ function buildDashboardAggregates({ sales, buys, allReturns }) {
       if(!byCategory[cat]) byCategory[cat] = { qty: 0, revenue: 0, cost: 0 };
       byCategory[cat].qty -= (Number(t.qty) || 0);
       byCategory[cat].revenue -= (Number(t.total) || 0);
-      byCategory[cat].cost -= getReturnCost(t) * (Number(t.qty) || 0);
+      byCategory[cat].cost -= returnCostTotal(t);
     });
   return {
     byCategoryEntries: Object.entries(byCategory).sort((a, b) => b[1].revenue - a[1].revenue),
@@ -449,13 +572,13 @@ function buildSaleReportAggregates({ txns, retTxnsAll, saleTxQ }) {
     if(!byProd[t.productId]) byProd[t.productId] = { qty: 0, revenue: 0, cost: 0 };
     byProd[t.productId].qty += t.qty;
     byProd[t.productId].revenue += t.total;
-    byProd[t.productId].cost += (t.cost || 0) * t.qty;
+    byProd[t.productId].cost += saleCostTotal(t);
   });
   retTxns.forEach(t => {
     if(!byProd[t.productId]) byProd[t.productId] = { qty: 0, revenue: 0, cost: 0 };
     byProd[t.productId].qty -= t.qty;
     byProd[t.productId].revenue -= t.total;
-    byProd[t.productId].cost -= getReturnCost(t) * (Number(t.qty) || 0);
+    byProd[t.productId].cost -= returnCostTotal(t);
   });
   const sorted = Object.entries(byProd).sort((a, b) => b[1].revenue - a[1].revenue);
   const maxRev = sorted.length ? sorted[0][1].revenue : 1;

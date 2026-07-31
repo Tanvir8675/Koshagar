@@ -63,6 +63,7 @@ const obf = (code) => JavaScriptObfuscator
 // External JS to obfuscate (relative paths, mirrored into dist/).
 const JS_FILES = [
   'app.js',
+  'config.js',
   'calc/financial.js',
   'db/sqlite.js',
   'ui/tx-render.js',

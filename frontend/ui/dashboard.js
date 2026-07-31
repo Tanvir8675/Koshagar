@@ -3,7 +3,7 @@
 // after the main script. Runtime-only (showPage('dashboard') / refresh), so
 // load order is safe. Depends on globals: pgReset, todayStr,
 // getCentralCalculationBundle, i18nText, fmt, currentLang, escapeHtml,
-// dateToYMDLocal, renderPaged, txGroupRow, groupReturnTxns, txReturnGroupRow,
+// dateToYMDLocal, displayDateOnly, displayDateTime, renderPaged, txGroupRow, groupReturnTxns, txReturnGroupRow,
 // and onclick handlers (quickCapitalAdjust, addExtraExpense, cancelEditExpense,
 // startEditExpense, deleteExtraExpense, addCashWithdrawal, cancelEditWithdrawal,
 // startEditWithdrawal, deleteCashWithdrawal, undoInvestmentTx, showStockAlerts).
@@ -17,7 +17,7 @@ function renderDashboard(keepPaging = false) {
   const snap = calc.snap;
   const metrics = calc.metrics;
   const ops = calc.ops;
-  document.getElementById('dashDate').textContent = new Date().toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'});
+  document.getElementById('dashDate').textContent = displayDateOnly(new Date());
   const dashAgg = ops.dashboardAggregates;
   const grossRev    = metrics.sales.grossRevenue;
   const returnTotal = metrics.sales.returnRevenue;
@@ -35,9 +35,12 @@ function renderDashboard(keepPaging = false) {
   const paymentsReceivedToday = metrics.cash.periodPaymentsReceived;
   const purchaseReturnCashIn = metrics.cash.purchaseReturnCashIn;
   const purchaseCashPaid = metrics.purchase.cashPaidAtBuy;
+  const purchaseExtraCostCashOut = metrics.purchase.extraCostCashOut || 0;
   const supplierDuePaidCashOut = metrics.purchase.supplierDuePaidCashOut;
   const openingCash = metrics.cash.openingCash;
   const capitalCashIn = metrics.cash.capitalCashIn || 0;
+  const investmentCashIn = metrics.cash.investmentCashIn || 0;
+  const loanCashIn = metrics.cash.loanCashIn || 0;
   const cashInToday = metrics.cash.cashIn;
   const cashOutToday = metrics.cash.cashOut;
   const totalInWithOpening = metrics.cash.totalInWithOpening;
@@ -46,6 +49,7 @@ function renderDashboard(keepPaging = false) {
   const extraExpensesToday = metrics.cash.extraExpensesTotal || 0;
   const extraExpensesListToday = metrics.cash.extraExpensesList || [];
   const withdrawalsListToday = metrics.cash.cashWithdrawalsList || [];
+  const loanPaymentCashOut = metrics.cash.loanPaymentCashOut || 0;
   const capitalRowsToday = (calc.snap?.capitalInRaw || []).slice().sort((a,b)=>new Date(b.date)-new Date(a.date));
   const t = i18nText;
 
@@ -75,7 +79,9 @@ function renderDashboard(keepPaging = false) {
           <div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Sale Cash In</div><div style="font-weight:700;color:var(--green)">+${fmt(saleCashIn)}</div></div>
           ${paymentsReceivedToday>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Due Received</div><div style="font-weight:700;color:var(--green)">+${fmt(paymentsReceivedToday)}</div></div>`:''}
           ${purchaseReturnCashIn>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Purchase Return Cash Back</div><div style="font-weight:700;color:var(--green)">+${fmt(purchaseReturnCashIn)}</div></div>`:''}
-          <div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Investment In</div><div style="font-weight:700;color:var(--green)">+${fmt(capitalCashIn)}</div></div>
+          ${investmentCashIn>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Investment In</div><div style="font-weight:700;color:var(--green)">+${fmt(investmentCashIn)}</div></div>`:''}
+          ${loanCashIn>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Loan In</div><div style="font-weight:700;color:var(--green)">+${fmt(loanCashIn)}</div></div>`:''}
+          ${(investmentCashIn<=0&&loanCashIn<=0)?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Funding In</div><div style="font-weight:700;color:var(--green)">+${fmt(capitalCashIn)}</div></div>`:''}
           <div style="display:flex;justify-content:space-between;align-items:center;border-top:1px dashed var(--border);margin-top:6px;padding-top:8px">
             <div style="font-size:0.8rem;font-weight:700">Total In (Today)</div>
             <div style="font-weight:700;color:var(--green);font-family:'Instrument Serif',serif">${fmt(cashInToday)}</div>
@@ -84,8 +90,10 @@ function renderDashboard(keepPaging = false) {
         <div style="background:var(--blue-light);border:1px solid var(--border);border-radius:10px;padding:10px">
           <div style="font-size:0.72rem;font-weight:700;color:var(--blue);text-transform:uppercase;margin-bottom:6px">${t('cashOut')}</div>
           <div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Purchase Paid (Cash)</div><div style="font-weight:700;color:var(--blue)">-${fmt(purchaseCashPaid)}</div></div>
+          ${purchaseExtraCostCashOut>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Purchase Extra Costing</div><div style="font-weight:700;color:var(--red)">-${fmt(purchaseExtraCostCashOut)}</div></div>`:''}
           ${saleReturnCashOut>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Sale Return Refund</div><div style="font-weight:700;color:var(--red)">-${fmt(saleReturnCashOut)}</div></div>`:''}
           ${supplierDuePaidCashOut>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Supplier Due Paid</div><div style="font-weight:700;color:var(--blue)">-${fmt(supplierDuePaidCashOut)}</div></div>`:''}
+          ${loanPaymentCashOut>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Loan Payment</div><div style="font-weight:700;color:var(--blue)">-${fmt(loanPaymentCashOut)}</div></div>`:''}
           ${extraExpensesToday>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Extra Expenses</div><div style="font-weight:700;color:var(--red)">-${fmt(extraExpensesToday)}</div></div>`:''}
           <div style="display:flex;justify-content:space-between;align-items:center;border-top:1px dashed var(--border);margin-top:6px;padding-top:8px">
             <div style="font-size:0.8rem;font-weight:700">Total Out (Today)</div>
@@ -114,7 +122,7 @@ function renderDashboard(keepPaging = false) {
         <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap">
           <input id="expenseAmount" type="number" min="0" step="0.01" placeholder="Amount" style="flex:1;min-width:90px;padding:8px 10px;border:1.5px solid var(--border);border-radius:9px;font-family:'Outfit',sans-serif;font-size:0.88rem;background:var(--surface)">
           <input id="expenseNote" type="text" placeholder="Note (e.g. Tea break)" style="flex:2;min-width:130px;padding:8px 10px;border:1.5px solid var(--border);border-radius:9px;font-family:'Outfit',sans-serif;font-size:0.88rem;background:var(--surface)">
-          <input id="expenseDate" type="date" value="${todayStr()}" style="flex:1;min-width:120px;padding:8px 10px;border:1.5px solid var(--border);border-radius:9px;font-family:'Outfit',sans-serif;font-size:0.85rem;background:var(--surface)">
+          <input id="expenseDate" type="date" class="app-date-input" value="${todayStr()}" style="flex:1;min-width:120px;padding:8px 10px;border:1.5px solid var(--border);border-radius:9px;font-family:'Outfit',sans-serif;font-size:0.85rem;background:var(--surface)">
           <button id="expenseSaveBtn" onclick="addExtraExpense()" style="padding:8px 14px;border:none;border-radius:9px;background:var(--ink);color:#fff;font-family:'Outfit',sans-serif;font-size:0.85rem;font-weight:700;cursor:pointer;white-space:nowrap">+ Add</button>
           <button id="expenseCancelBtn" onclick="cancelEditExpense()" style="display:none;padding:8px 12px;border:1.5px solid var(--border);border-radius:9px;background:var(--surface);color:var(--ink2);font-family:'Outfit',sans-serif;font-size:0.85rem;font-weight:700;cursor:pointer;white-space:nowrap">✕ Cancel</button>
         </div>
@@ -125,7 +133,7 @@ function renderDashboard(keepPaging = false) {
         <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap">
           <input id="withdrawalAmount" type="number" min="0" step="0.01" placeholder="Amount" style="flex:1;min-width:90px;padding:8px 10px;border:1.5px solid var(--border);border-radius:9px;font-family:'Outfit',sans-serif;font-size:0.88rem;background:var(--surface)">
           <input id="withdrawalReason" type="text" placeholder="Reason (e.g. Personal use)" style="flex:2;min-width:130px;padding:8px 10px;border:1.5px solid var(--border);border-radius:9px;font-family:'Outfit',sans-serif;font-size:0.88rem;background:var(--surface)">
-          <input id="withdrawalDate" type="date" value="${todayStr()}" style="flex:1;min-width:120px;padding:8px 10px;border:1.5px solid var(--border);border-radius:9px;font-family:'Outfit',sans-serif;font-size:0.85rem;background:var(--surface)">
+          <input id="withdrawalDate" type="date" class="app-date-input" value="${todayStr()}" style="flex:1;min-width:120px;padding:8px 10px;border:1.5px solid var(--border);border-radius:9px;font-family:'Outfit',sans-serif;font-size:0.85rem;background:var(--surface)">
           <button id="withdrawalSaveBtn" onclick="addCashWithdrawal()" style="padding:8px 14px;border:none;border-radius:9px;background:var(--ink);color:#fff;font-family:'Outfit',sans-serif;font-size:0.85rem;font-weight:700;cursor:pointer;white-space:nowrap">+ Add</button>
           <button id="withdrawalCancelBtn" onclick="cancelEditWithdrawal()" style="display:none;padding:8px 12px;border:1.5px solid var(--border);border-radius:9px;background:var(--surface);color:var(--ink2);font-family:'Outfit',sans-serif;font-size:0.85rem;font-weight:700;cursor:pointer;white-space:nowrap">✕ Cancel</button>
         </div>
@@ -142,7 +150,7 @@ function renderDashboard(keepPaging = false) {
         <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border)">
           <div>
             <div style="font-size:0.82rem;font-weight:600">${escapeHtml(e.note)}</div>
-            <div style="font-size:0.68rem;color:var(--ink2)">${e.date}</div>
+            <div style="font-size:0.68rem;color:var(--ink2)">${displayDateOnly(e.date) || e.date}</div>
           </div>
           <div style="display:flex;align-items:center;gap:6px">
             <span style="font-family:'Instrument Serif',serif;font-size:0.95rem;color:var(--red)">-${fmt(e.amount)}</span>
@@ -160,7 +168,7 @@ function renderDashboard(keepPaging = false) {
         <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border)">
           <div>
             <div style="font-size:0.82rem;font-weight:600">${escapeHtml(w.reason)}</div>
-            <div style="font-size:0.68rem;color:var(--ink2)">${w.date}</div>
+            <div style="font-size:0.68rem;color:var(--ink2)">${displayDateOnly(w.date) || w.date}</div>
           </div>
           <div style="display:flex;align-items:center;gap:6px">
             <span style="font-family:'Instrument Serif',serif;font-size:0.95rem;color:var(--red)">-${fmt(w.amount)}</span>
@@ -176,7 +184,7 @@ function renderDashboard(keepPaging = false) {
       capitalRowsToday,
       t => `
         <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border)">
-          <div style="font-size:0.76rem;color:var(--ink2)">${dateToYMDLocal(t.date)}${t.reason ? ` · ${escapeHtml(t.reason)}` : ''}</div>
+          <div style="font-size:0.76rem;color:var(--ink2)">${displayDateTime(t.date) || dateToYMDLocal(t.date)}${t.reason ? ` · ${escapeHtml(t.reason)}` : ''}</div>
           <div style="display:flex;align-items:center;gap:6px">
             <span style="font-weight:700;color:var(--green)">+${fmt(t.total)}</span>
             <button onclick="undoInvestmentTx('${t.id}')" style="font-size:0.78rem;padding:3px 8px;border:none;border-radius:7px;background:var(--red);color:#fff;font-weight:700;cursor:pointer">↩ Undo</button>

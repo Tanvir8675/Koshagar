@@ -20,16 +20,26 @@
 // (db/schema-relational.sql) WITHOUT changing this API.
 
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { ERP_SCHEMA_SQL } from './erp-schema.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, '.backend');
+const DATA_DIR = process.env.KOSHAGAR_DATA_DIR || path.join(__dirname, '.backend');
 const DB_FILE = path.join(DATA_DIR, 'koshagar.db');
 const LEGACY_STORE_FILE = path.join(DATA_DIR, 'store.json'); // one-time import source
 const PORT = Number(process.env.PORT || 3001);
+
+function getLanUrls(port) {
+  return Object.values(os.networkInterfaces())
+    .flat()
+    .filter(Boolean)
+    .filter(addr => addr.family === 'IPv4' && !addr.internal)
+    .map(addr => `http://${addr.address}:${port}`);
+}
 
 // Default per-user payload created on registration (identical to the old server).
 function defaultData() {
@@ -60,6 +70,7 @@ db.exec(`
     updated_at           TEXT NOT NULL
   );
 `);
+db.exec(ERP_SCHEMA_SQL);
 
 // Prepared statements (reused).
 const stmtGetUser = db.prepare('SELECT * FROM users WHERE user_id = ?');
@@ -70,6 +81,23 @@ const stmtInsertUser = db.prepare(`
 `);
 const stmtUpdateData = db.prepare('UPDATE users SET data_json = ?, ids_json = ?, updated_at = ? WHERE user_id = ?');
 const stmtCountUsers = db.prepare('SELECT COUNT(*) AS n FROM users');
+const stmtEnsureShop = db.prepare(`
+  INSERT INTO shops (id, name, created_at, updated_at)
+  VALUES (?, ?, ?, ?)
+  ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at
+`);
+const stmtEnsureMember = db.prepare(`
+  INSERT OR IGNORE INTO user_shop_members (user_id, shop_id, role, created_at)
+  VALUES (?, ?, 'owner', ?)
+`);
+
+function ensureErpShopForUser(userId, shopName = 'KoshAgar') {
+  const uid = normalizeUserId(userId);
+  if (!uid) return;
+  const now = new Date().toISOString();
+  stmtEnsureShop.run(uid, String(shopName || 'KoshAgar'), now, now);
+  stmtEnsureMember.run(uid, uid, now);
+}
 
 // One-time migration: if a legacy store.json exists and the table is empty,
 // import its users so no data is lost when upgrading from the JSON-blob server.
@@ -197,6 +225,7 @@ const server = http.createServer(async (req, res) => {
         now,
         now
       );
+      ensureErpShopForUser(userId);
       sendJson(res, 200, { ok: true, userId });
     } catch (error) {
       sendJson(res, 500, { ok: false, error: error.message || 'Registration failed' });
@@ -218,6 +247,7 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 401, { ok: false, error: 'Unauthorized' });
         return;
       }
+      ensureErpShopForUser(userId);
       sendJson(res, 200, { ok: true, userId: user.user_id, role: 'owner' });
     } catch (error) {
       sendJson(res, 500, { ok: false, error: error.message || 'Login failed' });
@@ -234,6 +264,7 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 404, { ok: false, error: 'User not found' });
         return;
       }
+      ensureErpShopForUser(userId);
       sendJson(res, 200, {
         ok: true,
         userId,
@@ -259,6 +290,7 @@ const server = http.createServer(async (req, res) => {
       const dataJson = JSON.stringify(body.data || parseJsonColumn(user.data_json, defaultData()));
       const idsJson = JSON.stringify(body.ids || parseJsonColumn(user.ids_json, {}));
       stmtUpdateData.run(dataJson, idsJson, new Date().toISOString(), userId);
+      ensureErpShopForUser(userId, body?.data?.shopName || 'KoshAgar');
       sendJson(res, 200, { ok: true, userId });
     } catch (error) {
       sendJson(res, 500, { ok: false, error: error.message || 'Save failed' });
@@ -269,6 +301,8 @@ const server = http.createServer(async (req, res) => {
   sendJson(res, 404, { ok: false, error: 'Not found' });
 });
 
-server.listen(PORT, () => {
-  console.log(`Backend listening on http://localhost:${PORT}  (store: SQLite @ ${DB_FILE})`);
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`Backend Local:   http://localhost:${PORT}`);
+  getLanUrls(PORT).forEach(url => console.log(`Backend Network: ${url}`));
+  console.log(`Backend Store:   SQLite @ ${DB_FILE}`);
 });

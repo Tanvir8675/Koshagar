@@ -14,17 +14,21 @@ window.KoshDB = (function () {
   const CDN_BASE = './vendor/';
   const IDB_STORE = 'data';
   const IDB_KEY = 'SQLITE_DB';
-  const SCHEMA_VERSION = '3';
+  const SCHEMA_VERSION = '6';
 
   let SQL = null;
   let sdb = null;
   let _initPromise = null;
   let _lastSyncSig = null;
+  let _normalizedRebuildTimer = null;
+  let _normalizedRebuildData = null;
+  let _normalizedRebuildIds = null;
 
   const api = {
     available: false,
     lastError: null,
     lastSyncAt: null,
+    normalizedStale: false,
     schemaVersion: SCHEMA_VERSION
   };
 
@@ -43,6 +47,7 @@ window.KoshDB = (function () {
       id TEXT PRIMARY KEY NOT NULL,
       type TEXT NOT NULL CHECK(type IN ('sale', 'purchase', 'return', 'adjustment', 'capital-in', 'capital-out')),
       date TEXT NOT NULL,
+      local_date TEXT NOT NULL DEFAULT '',
       productId TEXT NOT NULL,
       qty REAL NOT NULL CHECK(qty > 0),
       price REAL NOT NULL CHECK(price >= 0),
@@ -83,6 +88,7 @@ window.KoshDB = (function () {
     CREATE TABLE IF NOT EXISTS credits (
       id TEXT PRIMARY KEY NOT NULL,
       date TEXT NOT NULL,
+      local_date TEXT NOT NULL DEFAULT '',
       customerName TEXT NOT NULL CHECK(length(trim(COALESCE(customerName, ''))) > 0),
       customerPhone TEXT NOT NULL DEFAULT '',
       total REAL NOT NULL CHECK(total > 0),
@@ -98,6 +104,7 @@ window.KoshDB = (function () {
       id TEXT PRIMARY KEY NOT NULL,
       creditId TEXT NOT NULL,
       date TEXT NOT NULL,
+      local_date TEXT NOT NULL DEFAULT '',
       amount REAL NOT NULL CHECK(amount > 0),
       json TEXT NOT NULL DEFAULT '{}',
       FOREIGN KEY (creditId) REFERENCES credits(id) ON DELETE RESTRICT ON UPDATE CASCADE
@@ -106,6 +113,7 @@ window.KoshDB = (function () {
     CREATE TABLE IF NOT EXISTS supplier_credits (
       id TEXT PRIMARY KEY NOT NULL,
       date TEXT NOT NULL,
+      local_date TEXT NOT NULL DEFAULT '',
       supplierName TEXT NOT NULL DEFAULT '',
       supplierPhone TEXT NOT NULL DEFAULT '',
       total REAL NOT NULL CHECK(total > 0),
@@ -121,14 +129,27 @@ window.KoshDB = (function () {
       id TEXT PRIMARY KEY NOT NULL,
       scId TEXT NOT NULL,
       date TEXT NOT NULL,
+      local_date TEXT NOT NULL DEFAULT '',
       amount REAL NOT NULL CHECK(amount > 0),
       json TEXT NOT NULL DEFAULT '{}',
       FOREIGN KEY (scId) REFERENCES supplier_credits(id) ON DELETE RESTRICT ON UPDATE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS loan_payments (
+      id TEXT PRIMARY KEY NOT NULL,
+      loanTxId TEXT NOT NULL,
+      date TEXT NOT NULL,
+      local_date TEXT NOT NULL DEFAULT '',
+      amount REAL NOT NULL CHECK(amount > 0),
+      note TEXT NOT NULL DEFAULT '',
+      json TEXT NOT NULL DEFAULT '{}',
+      FOREIGN KEY (loanTxId) REFERENCES transactions(id) ON DELETE RESTRICT ON UPDATE CASCADE
+    );
+
     CREATE TABLE IF NOT EXISTS cash_withdrawals (
       id TEXT PRIMARY KEY NOT NULL,
       date TEXT NOT NULL,
+      local_date TEXT NOT NULL DEFAULT '',
       amount REAL NOT NULL CHECK(amount > 0),
       reason TEXT NOT NULL DEFAULT '',
       json TEXT NOT NULL DEFAULT '{}'
@@ -137,6 +158,7 @@ window.KoshDB = (function () {
     CREATE TABLE IF NOT EXISTS extra_expenses (
       id TEXT PRIMARY KEY NOT NULL,
       date TEXT NOT NULL,
+      local_date TEXT NOT NULL DEFAULT '',
       amount REAL NOT NULL CHECK(amount > 0),
       note TEXT NOT NULL DEFAULT '',
       json TEXT NOT NULL DEFAULT '{}'
@@ -162,17 +184,31 @@ window.KoshDB = (function () {
     );
 
     CREATE INDEX IF NOT EXISTS ix_tx_date ON transactions(date);
+    CREATE INDEX IF NOT EXISTS ix_tx_local_date ON transactions(local_date);
     CREATE INDEX IF NOT EXISTS ix_tx_type ON transactions(type);
+    CREATE INDEX IF NOT EXISTS ix_tx_type_local_date ON transactions(type, local_date);
+    CREATE INDEX IF NOT EXISTS ix_tx_type_date ON transactions(type, date);
     CREATE INDEX IF NOT EXISTS ix_tx_product ON transactions(productId);
     CREATE INDEX IF NOT EXISTS ix_tx_linked ON transactions(linkedTxId);
     CREATE INDEX IF NOT EXISTS ix_credits_date ON credits(date);
+    CREATE INDEX IF NOT EXISTS ix_credits_local_date ON credits(local_date);
     CREATE INDEX IF NOT EXISTS ix_credits_party ON credits(party_phone);
     CREATE INDEX IF NOT EXISTS ix_payments_credit ON payments(creditId);
+    CREATE INDEX IF NOT EXISTS ix_payments_date ON payments(date);
+    CREATE INDEX IF NOT EXISTS ix_payments_local_date ON payments(local_date);
     CREATE INDEX IF NOT EXISTS ix_scredits_date ON supplier_credits(date);
+    CREATE INDEX IF NOT EXISTS ix_scredits_local_date ON supplier_credits(local_date);
     CREATE INDEX IF NOT EXISTS ix_scredits_party ON supplier_credits(party_phone);
     CREATE INDEX IF NOT EXISTS ix_spayments_sc ON supplier_payments(scId);
+    CREATE INDEX IF NOT EXISTS ix_spayments_date ON supplier_payments(date);
+    CREATE INDEX IF NOT EXISTS ix_spayments_local_date ON supplier_payments(local_date);
+    CREATE INDEX IF NOT EXISTS ix_loan_payments_loan ON loan_payments(loanTxId);
+    CREATE INDEX IF NOT EXISTS ix_loan_payments_date ON loan_payments(date);
+    CREATE INDEX IF NOT EXISTS ix_loan_payments_local_date ON loan_payments(local_date);
     CREATE INDEX IF NOT EXISTS ix_withdrawals_date ON cash_withdrawals(date);
+    CREATE INDEX IF NOT EXISTS ix_withdrawals_local_date ON cash_withdrawals(local_date);
     CREATE INDEX IF NOT EXISTS ix_expenses_date ON extra_expenses(date);
+    CREATE INDEX IF NOT EXISTS ix_expenses_local_date ON extra_expenses(local_date);
 
     CREATE TRIGGER IF NOT EXISTS tr_products_no_delete_with_tx
     BEFORE DELETE ON products
@@ -247,6 +283,334 @@ window.KoshDB = (function () {
     BEGIN
       SELECT RAISE(ABORT, 'Supplier payments exceed credit total');
     END;
+  `;
+
+  const ERP_DDL = `
+    PRAGMA foreign_keys = ON;
+
+    CREATE TABLE IF NOT EXISTS shops (
+      id TEXT PRIMARY KEY NOT NULL,
+      name TEXT NOT NULL DEFAULT 'KoshAgar',
+      address TEXT NOT NULL DEFAULT '',
+      phone TEXT NOT NULL DEFAULT '',
+      currency_code TEXT NOT NULL DEFAULT 'BDT',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    INSERT OR IGNORE INTO shops (id, name, created_at, updated_at)
+    VALUES ('default', 'KoshAgar', datetime('now'), datetime('now'));
+
+    CREATE TABLE IF NOT EXISTS customers (
+      id TEXT PRIMARY KEY NOT NULL,
+      shop_id TEXT NOT NULL DEFAULT 'default',
+      name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+      phone TEXT NOT NULL DEFAULT '',
+      address TEXT NOT NULL DEFAULT '',
+      opening_due_paisa INTEGER NOT NULL DEFAULT 0 CHECK(opening_due_paisa >= 0),
+      active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(shop_id, phone),
+      FOREIGN KEY (shop_id) REFERENCES shops(id) ON DELETE CASCADE ON UPDATE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS suppliers (
+      id TEXT PRIMARY KEY NOT NULL,
+      shop_id TEXT NOT NULL DEFAULT 'default',
+      name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+      phone TEXT NOT NULL DEFAULT '',
+      address TEXT NOT NULL DEFAULT '',
+      opening_due_paisa INTEGER NOT NULL DEFAULT 0 CHECK(opening_due_paisa >= 0),
+      active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(shop_id, phone),
+      FOREIGN KEY (shop_id) REFERENCES shops(id) ON DELETE CASCADE ON UPDATE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS sales (
+      id TEXT PRIMARY KEY NOT NULL,
+      shop_id TEXT NOT NULL DEFAULT 'default',
+      invoice_no TEXT NOT NULL,
+      customer_id TEXT,
+      sale_date TEXT NOT NULL,
+      gross_paisa INTEGER NOT NULL DEFAULT 0 CHECK(gross_paisa >= 0),
+      discount_paisa INTEGER NOT NULL DEFAULT 0 CHECK(discount_paisa >= 0),
+      net_paisa INTEGER NOT NULL CHECK(net_paisa >= 0),
+      cash_paid_paisa INTEGER NOT NULL DEFAULT 0 CHECK(cash_paid_paisa >= 0),
+      status TEXT NOT NULL DEFAULT 'posted' CHECK(status IN ('draft','posted','void','returned')),
+      notes TEXT NOT NULL DEFAULT '',
+      source_ref TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(shop_id, invoice_no),
+      CHECK(discount_paisa <= gross_paisa),
+      CHECK(net_paisa = gross_paisa - discount_paisa),
+      CHECK(cash_paid_paisa <= net_paisa),
+      FOREIGN KEY (shop_id) REFERENCES shops(id) ON DELETE CASCADE ON UPDATE CASCADE,
+      FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE SET NULL ON UPDATE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS sale_items (
+      id TEXT PRIMARY KEY NOT NULL,
+      sale_id TEXT NOT NULL,
+      product_id TEXT NOT NULL,
+      unit_name TEXT NOT NULL DEFAULT '',
+      qty_milli INTEGER NOT NULL CHECK(qty_milli > 0),
+      unit_price_paisa INTEGER NOT NULL CHECK(unit_price_paisa >= 0),
+      discount_paisa INTEGER NOT NULL DEFAULT 0 CHECK(discount_paisa >= 0),
+      line_total_paisa INTEGER NOT NULL CHECK(line_total_paisa >= 0),
+      cogs_unit_paisa INTEGER NOT NULL DEFAULT 0 CHECK(cogs_unit_paisa >= 0),
+      created_at TEXT NOT NULL,
+      CHECK(line_total_paisa = ((qty_milli * unit_price_paisa) / 1000) - discount_paisa),
+      FOREIGN KEY (sale_id) REFERENCES sales(id) ON DELETE CASCADE ON UPDATE CASCADE,
+      FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE RESTRICT ON UPDATE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS purchases (
+      id TEXT PRIMARY KEY NOT NULL,
+      shop_id TEXT NOT NULL DEFAULT 'default',
+      bill_no TEXT NOT NULL,
+      supplier_id TEXT,
+      purchase_date TEXT NOT NULL,
+      gross_paisa INTEGER NOT NULL DEFAULT 0 CHECK(gross_paisa >= 0),
+      discount_paisa INTEGER NOT NULL DEFAULT 0 CHECK(discount_paisa >= 0),
+      extra_cost_paisa INTEGER NOT NULL DEFAULT 0 CHECK(extra_cost_paisa >= 0),
+      net_paisa INTEGER NOT NULL CHECK(net_paisa >= 0),
+      cash_paid_paisa INTEGER NOT NULL DEFAULT 0 CHECK(cash_paid_paisa >= 0),
+      status TEXT NOT NULL DEFAULT 'posted' CHECK(status IN ('draft','posted','void','returned')),
+      notes TEXT NOT NULL DEFAULT '',
+      source_ref TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(shop_id, bill_no),
+      CHECK(discount_paisa <= gross_paisa),
+      CHECK(net_paisa = gross_paisa - discount_paisa),
+      CHECK(cash_paid_paisa <= net_paisa),
+      FOREIGN KEY (shop_id) REFERENCES shops(id) ON DELETE CASCADE ON UPDATE CASCADE,
+      FOREIGN KEY (supplier_id) REFERENCES suppliers(id) ON DELETE SET NULL ON UPDATE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS purchase_items (
+      id TEXT PRIMARY KEY NOT NULL,
+      purchase_id TEXT NOT NULL,
+      product_id TEXT NOT NULL,
+      unit_name TEXT NOT NULL DEFAULT '',
+      qty_milli INTEGER NOT NULL CHECK(qty_milli > 0),
+      list_unit_paisa INTEGER NOT NULL DEFAULT 0 CHECK(list_unit_paisa >= 0),
+      net_unit_paisa INTEGER NOT NULL CHECK(net_unit_paisa >= 0),
+      landed_unit_paisa INTEGER NOT NULL CHECK(landed_unit_paisa >= 0),
+      discount_paisa INTEGER NOT NULL DEFAULT 0 CHECK(discount_paisa >= 0),
+      line_total_paisa INTEGER NOT NULL CHECK(line_total_paisa >= 0),
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (purchase_id) REFERENCES purchases(id) ON DELETE CASCADE ON UPDATE CASCADE,
+      FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE RESTRICT ON UPDATE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS inventory_movements (
+      id TEXT PRIMARY KEY NOT NULL,
+      shop_id TEXT NOT NULL DEFAULT 'default',
+      product_id TEXT NOT NULL,
+      movement_date TEXT NOT NULL,
+      movement_type TEXT NOT NULL CHECK(movement_type IN ('opening','purchase','sale','sale_return','purchase_return','adjustment_in','adjustment_out','damage','transfer_in','transfer_out')),
+      source_table TEXT NOT NULL DEFAULT '',
+      source_id TEXT NOT NULL DEFAULT '',
+      qty_delta_milli INTEGER NOT NULL CHECK(qty_delta_milli <> 0),
+      unit_cost_paisa INTEGER NOT NULL DEFAULT 0 CHECK(unit_cost_paisa >= 0),
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (shop_id) REFERENCES shops(id) ON DELETE CASCADE ON UPDATE CASCADE,
+      FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE RESTRICT ON UPDATE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS stock_levels (
+      shop_id TEXT NOT NULL DEFAULT 'default',
+      product_id TEXT NOT NULL,
+      qty_milli INTEGER NOT NULL DEFAULT 0,
+      value_paisa INTEGER NOT NULL DEFAULT 0 CHECK(value_paisa >= 0),
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (shop_id, product_id),
+      FOREIGN KEY (shop_id) REFERENCES shops(id) ON DELETE CASCADE ON UPDATE CASCADE,
+      FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE ON UPDATE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS customer_credits (
+      id TEXT PRIMARY KEY NOT NULL,
+      shop_id TEXT NOT NULL DEFAULT 'default',
+      customer_id TEXT NOT NULL,
+      sale_id TEXT,
+      credit_date TEXT NOT NULL,
+      total_paisa INTEGER NOT NULL CHECK(total_paisa > 0),
+      initial_paid_paisa INTEGER NOT NULL DEFAULT 0 CHECK(initial_paid_paisa >= 0),
+      status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','closed','void')),
+      created_at TEXT NOT NULL,
+      CHECK(initial_paid_paisa <= total_paisa),
+      FOREIGN KEY (shop_id) REFERENCES shops(id) ON DELETE CASCADE ON UPDATE CASCADE,
+      FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+      FOREIGN KEY (sale_id) REFERENCES sales(id) ON DELETE SET NULL ON UPDATE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS customer_payments (
+      id TEXT PRIMARY KEY NOT NULL,
+      credit_id TEXT NOT NULL,
+      payment_date TEXT NOT NULL,
+      amount_paisa INTEGER NOT NULL CHECK(amount_paisa <> 0),
+      method TEXT NOT NULL DEFAULT 'cash',
+      note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (credit_id) REFERENCES customer_credits(id) ON DELETE RESTRICT ON UPDATE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS supplier_credits_erp (
+      id TEXT PRIMARY KEY NOT NULL,
+      shop_id TEXT NOT NULL DEFAULT 'default',
+      supplier_id TEXT NOT NULL,
+      purchase_id TEXT,
+      credit_date TEXT NOT NULL,
+      total_paisa INTEGER NOT NULL CHECK(total_paisa > 0),
+      initial_paid_paisa INTEGER NOT NULL DEFAULT 0 CHECK(initial_paid_paisa >= 0),
+      status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','closed','void')),
+      created_at TEXT NOT NULL,
+      CHECK(initial_paid_paisa <= total_paisa),
+      FOREIGN KEY (shop_id) REFERENCES shops(id) ON DELETE CASCADE ON UPDATE CASCADE,
+      FOREIGN KEY (supplier_id) REFERENCES suppliers(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+      FOREIGN KEY (purchase_id) REFERENCES purchases(id) ON DELETE SET NULL ON UPDATE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS supplier_payments_erp (
+      id TEXT PRIMARY KEY NOT NULL,
+      credit_id TEXT NOT NULL,
+      payment_date TEXT NOT NULL,
+      amount_paisa INTEGER NOT NULL CHECK(amount_paisa <> 0),
+      method TEXT NOT NULL DEFAULT 'cash',
+      note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (credit_id) REFERENCES supplier_credits_erp(id) ON DELETE RESTRICT ON UPDATE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS cash_accounts (
+      id TEXT PRIMARY KEY NOT NULL,
+      shop_id TEXT NOT NULL DEFAULT 'default',
+      name TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'cash' CHECK(type IN ('cash','bank','mobile_money','owner')),
+      opening_balance_paisa INTEGER NOT NULL DEFAULT 0,
+      active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(shop_id, name),
+      FOREIGN KEY (shop_id) REFERENCES shops(id) ON DELETE CASCADE ON UPDATE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS cash_ledger (
+      id TEXT PRIMARY KEY NOT NULL,
+      shop_id TEXT NOT NULL DEFAULT 'default',
+      account_id TEXT,
+      entry_date TEXT NOT NULL,
+      direction TEXT NOT NULL CHECK(direction IN ('in','out')),
+      amount_paisa INTEGER NOT NULL CHECK(amount_paisa > 0),
+      source_table TEXT NOT NULL DEFAULT '',
+      source_id TEXT NOT NULL DEFAULT '',
+      note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (shop_id) REFERENCES shops(id) ON DELETE CASCADE ON UPDATE CASCADE,
+      FOREIGN KEY (account_id) REFERENCES cash_accounts(id) ON DELETE SET NULL ON UPDATE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS ix_sales_shop_date ON sales(shop_id, sale_date);
+    CREATE INDEX IF NOT EXISTS ix_sale_items_sale ON sale_items(sale_id);
+    CREATE INDEX IF NOT EXISTS ix_purchases_shop_date ON purchases(shop_id, purchase_date);
+    CREATE INDEX IF NOT EXISTS ix_inventory_product_date ON inventory_movements(shop_id, product_id, movement_date);
+    CREATE INDEX IF NOT EXISTS ix_cash_ledger_shop_date ON cash_ledger(shop_id, entry_date);
+
+    DROP TRIGGER IF EXISTS tr_erp_inventory_no_negative_ins;
+    CREATE TRIGGER IF NOT EXISTS tr_erp_inventory_no_negative_ins
+    BEFORE INSERT ON inventory_movements
+    FOR EACH ROW
+    WHEN COALESCE((SELECT value FROM meta WHERE key='__sync_mode'),'normal') <> 'force'
+      AND NEW.qty_delta_milli < 0
+      AND COALESCE((SELECT qty_milli FROM stock_levels WHERE shop_id = NEW.shop_id AND product_id = NEW.product_id), 0) + NEW.qty_delta_milli < 0
+    BEGIN
+      SELECT RAISE(ABORT, 'Inventory movement would make stock negative');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS tr_erp_inventory_apply_ins
+    AFTER INSERT ON inventory_movements
+    FOR EACH ROW
+    BEGIN
+      INSERT INTO stock_levels (shop_id, product_id, qty_milli, value_paisa, updated_at)
+      VALUES (
+        NEW.shop_id,
+        NEW.product_id,
+        NEW.qty_delta_milli,
+        CASE WHEN NEW.qty_delta_milli > 0 THEN (NEW.qty_delta_milli * NEW.unit_cost_paisa) / 1000 ELSE 0 END,
+        NEW.created_at
+      )
+      ON CONFLICT(shop_id, product_id) DO UPDATE SET
+        qty_milli = qty_milli + NEW.qty_delta_milli,
+        value_paisa = CASE
+          WHEN NEW.qty_delta_milli > 0 THEN value_paisa + ((NEW.qty_delta_milli * NEW.unit_cost_paisa) / 1000)
+          ELSE MAX(0, value_paisa - ((ABS(NEW.qty_delta_milli) * COALESCE(NEW.unit_cost_paisa, 0)) / 1000))
+        END,
+        updated_at = NEW.created_at;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS tr_erp_customer_payments_no_overpay_ins
+    BEFORE INSERT ON customer_payments
+    FOR EACH ROW
+    WHEN (
+      COALESCE((SELECT SUM(amount_paisa) FROM customer_payments WHERE credit_id = NEW.credit_id), 0)
+      + NEW.amount_paisa
+    ) > (
+      SELECT total_paisa - initial_paid_paisa FROM customer_credits WHERE id = NEW.credit_id
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'Customer payment exceeds due');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS tr_erp_supplier_payments_no_overpay_ins
+    BEFORE INSERT ON supplier_payments_erp
+    FOR EACH ROW
+    WHEN (
+      COALESCE((SELECT SUM(amount_paisa) FROM supplier_payments_erp WHERE credit_id = NEW.credit_id), 0)
+      + NEW.amount_paisa
+    ) > (
+      SELECT total_paisa - initial_paid_paisa FROM supplier_credits_erp WHERE id = NEW.credit_id
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'Supplier payment exceeds due');
+    END;
+
+    CREATE VIEW IF NOT EXISTS v_stock_on_hand AS
+    SELECT sl.shop_id, sl.product_id, p.name AS product_name, sl.qty_milli, sl.qty_milli / 1000.0 AS qty,
+           sl.value_paisa, sl.value_paisa / 100.0 AS stock_value
+    FROM stock_levels sl
+    JOIN products p ON p.id = sl.product_id;
+
+    CREATE VIEW IF NOT EXISTS v_customer_due AS
+    SELECT cc.shop_id, cc.customer_id, c.name AS customer_name, c.phone AS customer_phone,
+           SUM(cc.total_paisa - cc.initial_paid_paisa - COALESCE(pay.paid_paisa, 0)) AS due_paisa
+    FROM customer_credits cc
+    JOIN customers c ON c.id = cc.customer_id
+    LEFT JOIN (
+      SELECT credit_id, SUM(amount_paisa) AS paid_paisa
+      FROM customer_payments
+      GROUP BY credit_id
+    ) pay ON pay.credit_id = cc.id
+    WHERE cc.status = 'open'
+    GROUP BY cc.shop_id, cc.customer_id;
+
+    CREATE VIEW IF NOT EXISTS v_supplier_due AS
+    SELECT sc.shop_id, sc.supplier_id, s.name AS supplier_name, s.phone AS supplier_phone,
+           SUM(sc.total_paisa - sc.initial_paid_paisa - COALESCE(pay.paid_paisa, 0)) AS due_paisa
+    FROM supplier_credits_erp sc
+    JOIN suppliers s ON s.id = sc.supplier_id
+    LEFT JOIN (
+      SELECT credit_id, SUM(amount_paisa) AS paid_paisa
+      FROM supplier_payments_erp
+      GROUP BY credit_id
+    ) pay ON pay.credit_id = sc.id
+    WHERE sc.status = 'open'
+    GROUP BY sc.shop_id, sc.supplier_id;
   `;
 
   function loadBytes() {
@@ -329,6 +693,7 @@ window.KoshDB = (function () {
       payments:          [jsonRule('payments'), dateRule('payments')],
       supplier_credits:  [jsonRule('supplier_credits'), dateRule('supplier_credits')],
       supplier_payments: [jsonRule('supplier_payments'), dateRule('supplier_payments')],
+      loan_payments:     [jsonRule('loan_payments'), dateRule('loan_payments')],
       cash_withdrawals:  [jsonRule('cash_withdrawals'), dateRule('cash_withdrawals')],
       extra_expenses:    [jsonRule('extra_expenses'), dateRule('extra_expenses')],
       audit_trail:       [jsonRule('audit_trail')]
@@ -373,6 +738,7 @@ window.KoshDB = (function () {
     enableForeignKeys();
     registerFunctions();
     sdb.exec(RELATIONAL_DDL);
+    sdb.exec(ERP_DDL);
     sdb.exec(buildStrictTriggerDDL());
     seedSystemProduct();
     metaSet('schemaVersion', SCHEMA_VERSION);
@@ -471,6 +837,257 @@ window.KoshDB = (function () {
     return [entryUnit, entryQty, entryFactor, baseUnit];
   }
 
+  function toPaisa(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.round(n * 100) : 0;
+  }
+
+  function toMilli(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.max(0, Math.round(n * 1000)) : 0;
+  }
+
+  function ymd(v) {
+    const s = String(v || '');
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    const d = new Date(s);
+    if (!Number.isNaN(d.getTime())) {
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      return `${yyyy}-${mm}-${dd}`;
+    }
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    return m ? `${m[1]}-${m[2]}-${m[3]}` : new Date().toISOString().slice(0, 10);
+  }
+
+  function localDateOf(row) {
+    return ymd(row && row.date);
+  }
+
+  function stableKey(raw, prefix) {
+    const s = String(raw || prefix || 'row').trim() || prefix || 'row';
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619) >>> 0;
+    return String(prefix || 'id') + ':' + h.toString(16);
+  }
+
+  function linePriceAndDiscount(totalPaisa, qtyMilli) {
+    const q = Math.max(1, Number(qtyMilli) || 1);
+    const total = Math.max(0, Number(totalPaisa) || 0);
+    const unit = Math.ceil((total * 1000) / q);
+    const gross = Math.floor((q * unit) / 1000);
+    return { unit, discount: Math.max(0, gross - total) };
+  }
+
+  function billKeyFor(tx, fallbackPrefix) {
+    return String(tx.billId || tx.sourceBillId || tx.returnGroupId || tx.linkedTxId || tx.id || stableKey(JSON.stringify(tx), fallbackPrefix));
+  }
+
+  function groupRows(rows, keyFn) {
+    const m = new Map();
+    for (const row of rows || []) {
+      const key = keyFn(row);
+      if (!m.has(key)) m.set(key, []);
+      m.get(key).push(row);
+    }
+    return m;
+  }
+
+  const ERP_CLEAR_ORDER = [
+    'cash_ledger',
+    'customer_payments', 'supplier_payments_erp',
+    'customer_credits', 'supplier_credits_erp',
+    'sale_items', 'purchase_items',
+    'sales', 'purchases',
+    'inventory_movements', 'stock_levels',
+    'customers', 'suppliers'
+  ];
+
+  function clearNormalizedErpTables() {
+    for (const table of ERP_CLEAR_ORDER) sdb.run('DELETE FROM ' + table);
+  }
+
+  function upsertPerson(table, id, name, phone, nowIso) {
+    const stmt = table === 'customers'
+      ? sdb.prepare(`INSERT INTO customers (id, shop_id, name, phone, address, active, created_at, updated_at)
+          VALUES (?, 'default', ?, ?, '', 1, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET name=excluded.name, phone=excluded.phone, active=1, updated_at=excluded.updated_at`)
+      : sdb.prepare(`INSERT INTO suppliers (id, shop_id, name, phone, address, active, created_at, updated_at)
+          VALUES (?, 'default', ?, ?, '', 1, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET name=excluded.name, phone=excluded.phone, active=1, updated_at=excluded.updated_at`);
+    stmt.run([id, String(name || 'Unknown').trim() || 'Unknown', String(phone || ''), nowIso, nowIso]);
+    stmt.free();
+    return id;
+  }
+
+  function rebuildNormalizedErpTables(d) {
+    const nowIso = new Date().toISOString();
+    clearNormalizedErpTables();
+    sdb.run(`INSERT OR IGNORE INTO cash_accounts (id, shop_id, name, type, opening_balance_paisa, active, created_at, updated_at)
+      VALUES ('cash:main', 'default', 'Cash', 'cash', 0, 1, ?, ?)`, [nowIso, nowIso]);
+
+    const customerIds = new Map();
+    const supplierIds = new Map();
+    const getCustomerId = (name, phone) => {
+      const p = normalizeBdPhone(phone);
+      const key = p || stableKey(name || 'cash-customer', 'customer');
+      if (!customerIds.has(key)) {
+        customerIds.set(key, 'cust:' + key.replace(/[^a-zA-Z0-9:_-]/g, ''));
+        upsertPerson('customers', customerIds.get(key), name || 'Cash Customer', p || ('no-phone-' + customerIds.size), nowIso);
+      }
+      return customerIds.get(key);
+    };
+    const getSupplierId = (name, phone) => {
+      const p = normalizeBdPhone(phone);
+      const key = p || stableKey(name || 'cash-supplier', 'supplier');
+      if (!supplierIds.has(key)) {
+        supplierIds.set(key, 'supp:' + key.replace(/[^a-zA-Z0-9:_-]/g, ''));
+        upsertPerson('suppliers', supplierIds.get(key), name || 'Cash Supplier', p || ('no-phone-' + supplierIds.size), nowIso);
+      }
+      return supplierIds.get(key);
+    };
+
+    const saleByBill = groupRows((d.transactions || []).filter(t => t.type === 'sale'), t => billKeyFor(t, 'sale'));
+    const saleIns = sdb.prepare(`INSERT INTO sales
+      (id, shop_id, invoice_no, customer_id, sale_date, gross_paisa, discount_paisa, net_paisa, cash_paid_paisa, status, notes, source_ref, created_at, updated_at)
+      VALUES (?, 'default', ?, ?, ?, ?, ?, ?, ?, 'posted', '', ?, ?, ?)`);
+    const saleItemIns = sdb.prepare(`INSERT INTO sale_items
+      (id, sale_id, product_id, unit_name, qty_milli, unit_price_paisa, discount_paisa, line_total_paisa, cogs_unit_paisa, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    for (const [key, rows] of saleByBill) {
+      const first = rows[0] || {};
+      const saleId = 'sale:' + key;
+      const gross = rows.reduce((s, t) => s + toPaisa(Number(t.grossAmount) || Number(t.total) || 0), 0);
+      const net = rows.reduce((s, t) => s + toPaisa(t.total), 0);
+      const cash = rows.reduce((s, t) => s + toPaisa(t.cashPaid !== undefined ? t.cashPaid : t.total), 0);
+      const custId = getCustomerId(first.customer || 'Cash Customer', first.customerPhone || '');
+      saleIns.run([saleId, String(first.billId || key), custId, ymd(first.date), Math.max(gross, net), Math.max(0, Math.max(gross, net) - net), net, Math.min(cash, net), key, nowIso, nowIso]);
+      rows.forEach((t, idx) => {
+        const qtyM = Math.max(1, toMilli(t.qty));
+        const totalP = toPaisa(t.total);
+        const pd = linePriceAndDiscount(totalP, qtyM);
+        saleItemIns.run([saleId + ':item:' + idx + ':' + t.id, saleId, String(t.productId), String(t.entryUnit || t.unit || ''), qtyM, pd.unit, pd.discount, totalP, toPaisa(t.cost), nowIso]);
+      });
+    }
+    saleIns.free();
+    saleItemIns.free();
+
+    const purchByBill = groupRows((d.transactions || []).filter(t => t.type === 'purchase' && !t.opening), t => billKeyFor(t, 'purchase'));
+    const purchIns = sdb.prepare(`INSERT INTO purchases
+      (id, shop_id, bill_no, supplier_id, purchase_date, gross_paisa, discount_paisa, extra_cost_paisa, net_paisa, cash_paid_paisa, status, notes, source_ref, created_at, updated_at)
+      VALUES (?, 'default', ?, ?, ?, ?, ?, ?, ?, ?, 'posted', '', ?, ?, ?)`);
+    const purchItemIns = sdb.prepare(`INSERT INTO purchase_items
+      (id, purchase_id, product_id, unit_name, qty_milli, list_unit_paisa, net_unit_paisa, landed_unit_paisa, discount_paisa, line_total_paisa, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    for (const [key, rows] of purchByBill) {
+      const first = rows[0] || {};
+      const purchaseId = 'purchase:' + key;
+      const gross = rows.reduce((s, t) => s + toPaisa(Number(t.grossAmount) || Number(t.total) || 0), 0);
+      const net = rows.reduce((s, t) => s + toPaisa(t.total), 0);
+      const extra = rows.reduce((s, t) => s + toPaisa(t.lineExtraCost), 0);
+      const cash = rows.reduce((s, t) => s + toPaisa(t.cashPaid !== undefined ? t.cashPaid : t.total), 0);
+      const supplierId = getSupplierId(first.supplier || 'Cash Supplier', first.supplierPhone || '');
+      purchIns.run([purchaseId, String(first.billId || key), supplierId, ymd(first.date), Math.max(gross, net), Math.max(0, Math.max(gross, net) - net), extra, net, Math.min(cash, net), key, nowIso, nowIso]);
+      rows.forEach((t, idx) => {
+        const qtyM = Math.max(1, toMilli(t.qty));
+        const totalP = toPaisa(t.total);
+        const grossP = toPaisa(Number(t.grossAmount) || Number(t.total) || 0);
+        const netUnit = linePriceAndDiscount(totalP, qtyM).unit;
+        const listUnit = linePriceAndDiscount(Math.max(grossP, totalP), qtyM).unit;
+        const landedUnit = linePriceAndDiscount(totalP + toPaisa(t.lineExtraCost), qtyM).unit;
+        purchItemIns.run([purchaseId + ':item:' + idx + ':' + t.id, purchaseId, String(t.productId), String(t.entryUnit || t.unit || ''), qtyM, listUnit, netUnit, landedUnit, Math.max(0, grossP - totalP), totalP, nowIso]);
+      });
+    }
+    purchIns.free();
+    purchItemIns.free();
+
+    const movIns = sdb.prepare(`INSERT INTO inventory_movements
+      (id, shop_id, product_id, movement_date, movement_type, source_table, source_id, qty_delta_milli, unit_cost_paisa, created_at)
+      VALUES (?, 'default', ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const sortedTx = sortTransactionsForInsert(d.transactions || []);
+    sortedTx.forEach((t, idx) => {
+      if (!t.productId || t.productId === '__CAPITAL__') return;
+      const qtyM = Math.max(1, toMilli(t.qty));
+      let type = '', delta = 0;
+      if (t.type === 'purchase') { type = t.opening ? 'opening' : 'purchase'; delta = qtyM; }
+      else if (t.type === 'sale') { type = 'sale'; delta = -qtyM; }
+      else if (t.type === 'return' && t.returnType === 'purchase-return') { type = 'purchase_return'; delta = -qtyM; }
+      else if (t.type === 'return') { type = 'sale_return'; delta = qtyM; }
+      else if (t.type === 'adjustment') {
+        const adj = String(t.adjustmentType || '').toLowerCase();
+        type = adj.includes('damage') || adj.includes('loss') ? 'damage' : (Number(t.qty) < 0 ? 'adjustment_out' : 'adjustment_in');
+        delta = adj.includes('out') || adj.includes('damage') || adj.includes('loss') ? -qtyM : qtyM;
+      }
+      if (!type || !delta) return;
+      movIns.run(['mov:' + idx + ':' + t.id, String(t.productId), ymd(t.date), type, 'transactions', String(t.id), delta, toPaisa(t.cost || t.price || 0), nowIso]);
+    });
+    movIns.free();
+
+    const custCreditIns = sdb.prepare(`INSERT INTO customer_credits
+      (id, shop_id, customer_id, sale_id, credit_date, total_paisa, initial_paid_paisa, status, created_at)
+      VALUES (?, 'default', ?, ?, ?, ?, ?, ?, ?)`);
+    for (const c of (d.credits || [])) {
+      const customerId = getCustomerId(c.customerName || 'Unknown Customer', c.customerPhone || '');
+      const totalP = toPaisa(c.total);
+      if (totalP <= 0) continue;
+      custCreditIns.run([String(c.id), customerId, c.billId ? 'sale:' + c.billId : (c.txId ? 'sale:' + c.txId : null), ymd(c.date), totalP, Math.min(toPaisa(c.paid), totalP), 'open', nowIso]);
+    }
+    custCreditIns.free();
+
+    const custPayIns = sdb.prepare(`INSERT INTO customer_payments (id, credit_id, payment_date, amount_paisa, method, note, created_at)
+      VALUES (?, ?, ?, ?, 'cash', ?, ?)`);
+    for (const p of (d.payments || [])) {
+      const amt = toPaisa(p.amount);
+      if (!p.creditId || !amt) continue;
+      custPayIns.run([String(p.id), String(p.creditId), ymd(p.date), amt, String(p.note || ''), nowIso]);
+    }
+    custPayIns.free();
+
+    const suppCreditIns = sdb.prepare(`INSERT INTO supplier_credits_erp
+      (id, shop_id, supplier_id, purchase_id, credit_date, total_paisa, initial_paid_paisa, status, created_at)
+      VALUES (?, 'default', ?, ?, ?, ?, ?, ?, ?)`);
+    for (const sc of (d.supplierCredits || [])) {
+      const supplierId = getSupplierId(sc.supplierName || 'Unknown Supplier', sc.supplierPhone || '');
+      const totalP = toPaisa(sc.total);
+      if (totalP <= 0) continue;
+      suppCreditIns.run([String(sc.id), supplierId, sc.billId ? 'purchase:' + sc.billId : (sc.txId ? 'purchase:' + sc.txId : null), ymd(sc.date), totalP, Math.min(toPaisa(sc.paid), totalP), 'open', nowIso]);
+    }
+    suppCreditIns.free();
+
+    const suppPayIns = sdb.prepare(`INSERT INTO supplier_payments_erp (id, credit_id, payment_date, amount_paisa, method, note, created_at)
+      VALUES (?, ?, ?, ?, 'cash', ?, ?)`);
+    for (const sp of (d.supplierPayments || [])) {
+      const amt = toPaisa(sp.amount);
+      if (!sp.scId || !amt) continue;
+      suppPayIns.run([String(sp.id), String(sp.scId), ymd(sp.date), amt, String(sp.note || ''), nowIso]);
+    }
+    suppPayIns.free();
+
+    const cashIns = sdb.prepare(`INSERT INTO cash_ledger
+      (id, shop_id, account_id, entry_date, direction, amount_paisa, source_table, source_id, note, created_at)
+      VALUES (?, 'default', 'cash:main', ?, ?, ?, ?, ?, ?, ?)`);
+    const addCash = (id, date, direction, amount, sourceTable, sourceId, note) => {
+      const amt = toPaisa(amount);
+      if (amt <= 0) return;
+      cashIns.run([id, ymd(date), direction, amt, sourceTable, String(sourceId || ''), String(note || ''), nowIso]);
+    };
+    (d.transactions || []).forEach(t => {
+      if (t.type === 'sale') addCash('cash:tx:' + t.id, t.date, 'in', t.cashPaid !== undefined ? t.cashPaid : t.total, 'transactions', t.id, 'sale cash');
+      else if (t.type === 'purchase') addCash('cash:tx:' + t.id, t.date, 'out', (Number(t.cashPaid !== undefined ? t.cashPaid : t.total) || 0) + (Number(t.lineExtraCost) || 0), 'transactions', t.id, 'purchase cash');
+      else if (t.type === 'return' && t.returnType === 'purchase-return') addCash('cash:tx:' + t.id, t.date, 'in', t.cashPaid !== undefined ? t.cashPaid : t.total, 'transactions', t.id, 'purchase return');
+      else if (t.type === 'return') addCash('cash:tx:' + t.id, t.date, 'out', t.cashPaid !== undefined ? t.cashPaid : t.total, 'transactions', t.id, 'sale return');
+      else if (t.type === 'capital-in') addCash('cash:tx:' + t.id, t.date, 'in', t.total || t.cashPaid, 'transactions', t.id, 'capital in');
+      else if (t.type === 'capital-out') addCash('cash:tx:' + t.id, t.date, 'out', t.total || t.cashPaid, 'transactions', t.id, 'capital out');
+    });
+    (d.payments || []).forEach(p => addCash('cash:pay:' + p.id, p.date, 'in', p.amount, 'payments', p.id, 'customer payment'));
+    (d.supplierPayments || []).forEach(sp => addCash('cash:suppay:' + sp.id, sp.date, 'out', sp.amount, 'supplier_payments', sp.id, 'supplier payment'));
+    (d.loanPayments || []).forEach(lp => addCash('cash:loanpay:' + lp.id, lp.date, 'out', lp.amount, 'loan_payments', lp.id, 'loan repayment'));
+    (d.extraExpenses || []).forEach(e => addCash('cash:expense:' + e.id, e.date, 'out', e.amount, 'extra_expenses', e.id, e.note || 'extra expense'));
+    (d.cashWithdrawals || []).forEach(w => addCash('cash:withdraw:' + w.id, w.date, 'out', w.amount, 'cash_withdrawals', w.id, w.reason || 'withdrawal'));
+    cashIns.free();
+  }
+
   function scalar(sql, params) {
     try {
       const stmt = sdb.prepare(sql);
@@ -548,12 +1165,12 @@ window.KoshDB = (function () {
   const GUARD_DELETE_FRACTION = 0.5;  // refuse if >50% of such a table would vanish
   const GUARDED_TABLES = new Set([
     'transactions', 'products', 'credits', 'payments',
-    'supplier_credits', 'supplier_payments', 'cash_withdrawals', 'extra_expenses'
+    'supplier_credits', 'supplier_payments', 'loan_payments', 'cash_withdrawals', 'extra_expenses'
   ]);
   // Deletes run child-first so FK RESTRICT / delete-protection triggers don't
   // abort on a parent whose children are being removed in the same save.
   const DELETE_ORDER = [
-    'payments', 'supplier_payments', 'transactions', 'audit_trail',
+    'payments', 'supplier_payments', 'loan_payments', 'transactions', 'audit_trail',
     'cash_withdrawals', 'extra_expenses', 'credits', 'supplier_credits', 'products'
   ];
 
@@ -602,16 +1219,16 @@ window.KoshDB = (function () {
         idOf: t => str(t.id),
         jsonOf: t => J(t),
         upsertSql: `INSERT INTO transactions
-            (id, type, date, productId, qty, price, cost, total, cashPaid, returnType, linkedTxId, opening, adjustmentType, entry_unit, entry_qty, entry_factor, base_unit, json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, type, date, local_date, productId, qty, price, cost, total, cashPaid, returnType, linkedTxId, opening, adjustmentType, entry_unit, entry_qty, entry_factor, base_unit, json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
-            type=excluded.type, date=excluded.date, productId=excluded.productId, qty=excluded.qty,
+            type=excluded.type, date=excluded.date, local_date=excluded.local_date, productId=excluded.productId, qty=excluded.qty,
             price=excluded.price, cost=excluded.cost, total=excluded.total, cashPaid=excluded.cashPaid,
             returnType=excluded.returnType, linkedTxId=excluded.linkedTxId, opening=excluded.opening,
             adjustmentType=excluded.adjustmentType, entry_unit=excluded.entry_unit, entry_qty=excluded.entry_qty,
             entry_factor=excluded.entry_factor, base_unit=excluded.base_unit, json=excluded.json`,
         paramsOf: (t, j) => [
-          str(t.id), str(t.type), str(t.date), str(t.productId),
+          str(t.id), str(t.type), str(t.date), localDateOf(t), str(t.productId),
           num(t.qty), num(t.price), num(t.cost), num(t.total), num(t.cashPaid),
           str(t.returnType),
           (t.linkedTxId !== undefined && t.linkedTxId !== null && String(t.linkedTxId) !== '') ? str(t.linkedTxId) : null,
@@ -623,58 +1240,67 @@ window.KoshDB = (function () {
         rows: d.credits || [],
         idOf: c => str(c.id),
         jsonOf: c => J(c),
-        upsertSql: `INSERT INTO credits (id, date, customerName, customerPhone, total, paid, party_phone, json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET date=excluded.date, customerName=excluded.customerName,
+        upsertSql: `INSERT INTO credits (id, date, local_date, customerName, customerPhone, total, paid, party_phone, json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET date=excluded.date, local_date=excluded.local_date, customerName=excluded.customerName,
             customerPhone=excluded.customerPhone, total=excluded.total, paid=excluded.paid,
             party_phone=excluded.party_phone, json=excluded.json`,
-        paramsOf: (c, j) => [str(c.id), str(c.date), str(c.customerName) || 'Unknown Customer', str(c.customerPhone) || '', num(c.total), num(c.paid) || 0, partyPhoneOf(c.customerPhone), j]
+        paramsOf: (c, j) => [str(c.id), str(c.date), localDateOf(c), str(c.customerName) || 'Unknown Customer', str(c.customerPhone) || '', num(c.total), num(c.paid) || 0, partyPhoneOf(c.customerPhone), j]
       },
       {
         table: 'payments',
         rows: d.payments || [],
         idOf: p => str(p.id),
         jsonOf: p => J(p),
-        upsertSql: `INSERT INTO payments (id, creditId, date, amount, json) VALUES (?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET creditId=excluded.creditId, date=excluded.date, amount=excluded.amount, json=excluded.json`,
-        paramsOf: (p, j) => [str(p.id), str(p.creditId), str(p.date), num(p.amount), j]
+        upsertSql: `INSERT INTO payments (id, creditId, date, local_date, amount, json) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET creditId=excluded.creditId, date=excluded.date, local_date=excluded.local_date, amount=excluded.amount, json=excluded.json`,
+        paramsOf: (p, j) => [str(p.id), str(p.creditId), str(p.date), localDateOf(p), num(p.amount), j]
       },
       {
         table: 'supplier_credits',
         rows: d.supplierCredits || [],
         idOf: sc => str(sc.id),
         jsonOf: sc => J(sc),
-        upsertSql: `INSERT INTO supplier_credits (id, date, supplierName, supplierPhone, total, paid, party_phone, json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET date=excluded.date, supplierName=excluded.supplierName,
+        upsertSql: `INSERT INTO supplier_credits (id, date, local_date, supplierName, supplierPhone, total, paid, party_phone, json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET date=excluded.date, local_date=excluded.local_date, supplierName=excluded.supplierName,
             supplierPhone=excluded.supplierPhone, total=excluded.total, paid=excluded.paid,
             party_phone=excluded.party_phone, json=excluded.json`,
-        paramsOf: (sc, j) => [str(sc.id), str(sc.date), str(sc.supplierName) || '', str(sc.supplierPhone) || '', num(sc.total), num(sc.paid) || 0, partyPhoneOf(sc.supplierPhone), j]
+        paramsOf: (sc, j) => [str(sc.id), str(sc.date), localDateOf(sc), str(sc.supplierName) || '', str(sc.supplierPhone) || '', num(sc.total), num(sc.paid) || 0, partyPhoneOf(sc.supplierPhone), j]
       },
       {
         table: 'supplier_payments',
         rows: d.supplierPayments || [],
         idOf: sp => str(sp.id),
         jsonOf: sp => J(sp),
-        upsertSql: `INSERT INTO supplier_payments (id, scId, date, amount, json) VALUES (?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET scId=excluded.scId, date=excluded.date, amount=excluded.amount, json=excluded.json`,
-        paramsOf: (sp, j) => [str(sp.id), str(sp.scId), str(sp.date), num(sp.amount), j]
+        upsertSql: `INSERT INTO supplier_payments (id, scId, date, local_date, amount, json) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET scId=excluded.scId, date=excluded.date, local_date=excluded.local_date, amount=excluded.amount, json=excluded.json`,
+        paramsOf: (sp, j) => [str(sp.id), str(sp.scId), str(sp.date), localDateOf(sp), num(sp.amount), j]
+      },
+      {
+        table: 'loan_payments',
+        rows: d.loanPayments || [],
+        idOf: lp => str(lp.id),
+        jsonOf: lp => J(lp),
+        upsertSql: `INSERT INTO loan_payments (id, loanTxId, date, local_date, amount, note, json) VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET loanTxId=excluded.loanTxId, date=excluded.date, local_date=excluded.local_date, amount=excluded.amount, note=excluded.note, json=excluded.json`,
+        paramsOf: (lp, j) => [str(lp.id), str(lp.loanTxId), str(lp.date), localDateOf(lp), num(lp.amount), str(lp.note) || '', j]
       },
       {
         table: 'cash_withdrawals',
         rows: d.cashWithdrawals || [],
         idOf: w => str(w.id),
         jsonOf: w => J(w),
-        upsertSql: `INSERT INTO cash_withdrawals (id, date, amount, reason, json) VALUES (?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET date=excluded.date, amount=excluded.amount, reason=excluded.reason, json=excluded.json`,
-        paramsOf: (w, j) => [str(w.id), str(w.date), num(w.amount), str(w.reason) || '', j]
+        upsertSql: `INSERT INTO cash_withdrawals (id, date, local_date, amount, reason, json) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET date=excluded.date, local_date=excluded.local_date, amount=excluded.amount, reason=excluded.reason, json=excluded.json`,
+        paramsOf: (w, j) => [str(w.id), str(w.date), localDateOf(w), num(w.amount), str(w.reason) || '', j]
       },
       {
         table: 'extra_expenses',
         rows: d.extraExpenses || [],
         idOf: e => str(e.id),
         jsonOf: e => J(e),
-        upsertSql: `INSERT INTO extra_expenses (id, date, amount, note, json) VALUES (?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET date=excluded.date, amount=excluded.amount, note=excluded.note, json=excluded.json`,
-        paramsOf: (e, j) => [str(e.id), str(e.date), num(e.amount), str(e.note) || '', j]
+        upsertSql: `INSERT INTO extra_expenses (id, date, local_date, amount, note, json) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET date=excluded.date, local_date=excluded.local_date, amount=excluded.amount, note=excluded.note, json=excluded.json`,
+        paramsOf: (e, j) => [str(e.id), str(e.date), localDateOf(e), num(e.amount), str(e.note) || '', j]
       },
       {
         table: 'audit_trail',
@@ -694,11 +1320,16 @@ window.KoshDB = (function () {
 
   // Incremental sync. Returns { ok:true } on commit, or { guard:{...} } (no
   // writes performed) when a non-forced save would delete too much.
-  function persistFromDataInternal(d, idsSnapshot, force) {
+  function persistFromDataInternal(d, idsSnapshot, force, options = {}) {
     enableForeignKeys();
 
     // Phase A — compute the diff read-only (no writes, so we can bail safely).
-    const specs = jsonTableSpecs(d);
+    const dirtyTables = options && Array.isArray(options.dirtyTables)
+      ? new Set(options.dirtyTables.map(String).filter(Boolean))
+      : null;
+    const specs = dirtyTables
+      ? jsonTableSpecs(d).filter(spec => dirtyTables.has(spec.table))
+      : jsonTableSpecs(d);
     const existingMaps = {};
     const deletePlan = {};
     for (const spec of specs) {
@@ -730,6 +1361,13 @@ window.KoshDB = (function () {
       // Lets the validation triggers bypass during force/bulk sync; read by
       // their WHEN clauses within this same transaction.
       metaSet('__sync_mode', force ? 'force' : 'normal');
+      if (force) {
+        // Reset/import/date-wipe rebuild both the JSON mirror and normalized ERP
+        // tables from one app snapshot. Clear ERP children first so product/party
+        // mirror rows can be removed without stale FK references blocking the save.
+        try { sdb.run('PRAGMA defer_foreign_keys = ON'); } catch (_) {}
+        clearNormalizedErpTables();
+      }
       seedSystemProduct();
 
       // Deletes first, child-first.
@@ -745,20 +1383,22 @@ window.KoshDB = (function () {
       // from credits + supplier_credits so it always reflects current rows. Synced
       // before the credit upserts below so their party_phone FK resolves (the FK is
       // also DEFERRABLE, so intra-transaction order is not load-bearing).
-      const desiredParties = buildPartyRows(d);
-      const desiredPartyPhones = new Set(desiredParties.map(p => p.phone));
-      const existingPartyPhones = new Set();
-      try {
-        const pr = sdb.exec('SELECT phone FROM parties');
-        if (pr[0]) for (const r of pr[0].values) existingPartyPhones.add(String(r[0]));
-      } catch (_) {}
-      const pup = sdb.prepare(`INSERT INTO parties (phone, name, type, json) VALUES (?, ?, ?, ?)
-        ON CONFLICT(phone) DO UPDATE SET name=excluded.name, type=excluded.type, json=excluded.json`);
-      for (const p of desiredParties) pup.run([p.phone, p.name, p.type, p.json]);
-      pup.free();
-      const pdel = sdb.prepare('DELETE FROM parties WHERE phone = ?');
-      for (const ph of existingPartyPhones) if (!desiredPartyPhones.has(ph)) pdel.run([ph]);
-      pdel.free();
+      if (!dirtyTables || dirtyTables.has('credits') || dirtyTables.has('supplier_credits')) {
+        const desiredParties = buildPartyRows(d);
+        const desiredPartyPhones = new Set(desiredParties.map(p => p.phone));
+        const existingPartyPhones = new Set();
+        try {
+          const pr = sdb.exec('SELECT phone FROM parties');
+          if (pr[0]) for (const r of pr[0].values) existingPartyPhones.add(String(r[0]));
+        } catch (_) {}
+        const pup = sdb.prepare(`INSERT INTO parties (phone, name, type, json) VALUES (?, ?, ?, ?)
+          ON CONFLICT(phone) DO UPDATE SET name=excluded.name, type=excluded.type, json=excluded.json`);
+        for (const p of desiredParties) pup.run([p.phone, p.name, p.type, p.json]);
+        pup.free();
+        const pdel = sdb.prepare('DELETE FROM parties WHERE phone = ?');
+        for (const ph of existingPartyPhones) if (!desiredPartyPhones.has(ph)) pdel.run([ph]);
+        pdel.free();
+      }
 
       // Upserts, parent→child (specs order). Unchanged rows are skipped.
       for (const spec of specs) {
@@ -776,36 +1416,47 @@ window.KoshDB = (function () {
       }
 
       // units (natural key: name)
-      const desiredUnits = new Set((d.units || []).map(u => str(u)).filter(Boolean));
-      const existingUnits = new Set();
-      try {
-        const ur = sdb.exec('SELECT name FROM units');
-        if (ur[0]) for (const r of ur[0].values) existingUnits.add(String(r[0]));
-      } catch (_) {}
-      const uins = sdb.prepare('INSERT OR IGNORE INTO units (name) VALUES (?)');
-      for (const n of desiredUnits) if (!existingUnits.has(n)) uins.run([n]);
-      uins.free();
-      const udel = sdb.prepare('DELETE FROM units WHERE name = ?');
-      for (const n of existingUnits) if (!desiredUnits.has(n)) udel.run([n]);
-      udel.free();
+      if (!dirtyTables || dirtyTables.has('units')) {
+        const desiredUnits = new Set((d.units || []).map(u => str(u)).filter(Boolean));
+        const existingUnits = new Set();
+        try {
+          const ur = sdb.exec('SELECT name FROM units');
+          if (ur[0]) for (const r of ur[0].values) existingUnits.add(String(r[0]));
+        } catch (_) {}
+        const uins = sdb.prepare('INSERT OR IGNORE INTO units (name) VALUES (?)');
+        for (const n of desiredUnits) if (!existingUnits.has(n)) uins.run([n]);
+        uins.free();
+        const udel = sdb.prepare('DELETE FROM units WHERE name = ?');
+        for (const n of existingUnits) if (!desiredUnits.has(n)) udel.run([n]);
+        udel.free();
+      }
 
       // opening_cash (natural key: date)
-      const oc = d.openingCashByDate || {};
-      const desiredOc = new Map();
-      Object.keys(oc).forEach(k => {
-        if (/^\d{4}-\d{2}-\d{2}$/.test(String(k))) desiredOc.set(String(k), num(oc[k]) || 0);
-      });
-      const existingOc = new Map();
-      try {
-        const ocr = sdb.exec('SELECT date, amount FROM opening_cash');
-        if (ocr[0]) for (const r of ocr[0].values) existingOc.set(String(r[0]), Number(r[1]));
-      } catch (_) {}
-      const ocup = sdb.prepare('INSERT INTO opening_cash (date, amount) VALUES (?, ?) ON CONFLICT(date) DO UPDATE SET amount=excluded.amount');
-      for (const [k, v] of desiredOc) if (existingOc.get(k) !== v) ocup.run([k, v]);
-      ocup.free();
-      const ocdel = sdb.prepare('DELETE FROM opening_cash WHERE date = ?');
-      for (const k of existingOc.keys()) if (!desiredOc.has(k)) ocdel.run([k]);
-      ocdel.free();
+      if (!dirtyTables || dirtyTables.has('opening_cash')) {
+        const oc = d.openingCashByDate || {};
+        const desiredOc = new Map();
+        Object.keys(oc).forEach(k => {
+          if (/^\d{4}-\d{2}-\d{2}$/.test(String(k))) desiredOc.set(String(k), num(oc[k]) || 0);
+        });
+        const existingOc = new Map();
+        try {
+          const ocr = sdb.exec('SELECT date, amount FROM opening_cash');
+          if (ocr[0]) for (const r of ocr[0].values) existingOc.set(String(r[0]), Number(r[1]));
+        } catch (_) {}
+        const ocup = sdb.prepare('INSERT INTO opening_cash (date, amount) VALUES (?, ?) ON CONFLICT(date) DO UPDATE SET amount=excluded.amount');
+        for (const [k, v] of desiredOc) if (existingOc.get(k) !== v) ocup.run([k, v]);
+        ocup.free();
+        const ocdel = sdb.prepare('DELETE FROM opening_cash WHERE date = ?');
+        for (const k of existingOc.keys()) if (!desiredOc.has(k)) ocdel.run([k]);
+        ocdel.free();
+      }
+
+      if (force) {
+        rebuildNormalizedErpTables(d);
+        api.normalizedStale = false;
+      } else if (!dirtyTables || ['transactions', 'credits', 'payments', 'supplier_credits', 'supplier_payments', 'products'].some(t => dirtyTables.has(t))) {
+        api.normalizedStale = true;
+      }
 
       // meta (settings + id counters) — upserted, never wiped.
       metaSet('schemaVersion', SCHEMA_VERSION);
@@ -852,6 +1503,7 @@ window.KoshDB = (function () {
       payments: rowsJson('payments'),
       supplierCredits: rowsJson('supplier_credits'),
       supplierPayments: rowsJson('supplier_payments'),
+      loanPayments: rowsJson('loan_payments'),
       cashWithdrawals: rowsJson('cash_withdrawals'),
       extraExpenses: rowsJson('extra_expenses'),
       auditTrail: rowsJson('audit_trail'),
@@ -946,18 +1598,21 @@ window.KoshDB = (function () {
   };
 
   /** Primary write — must succeed before JSON backup. Returns { ok, error?, issues? } */
-  api.persistFromData = async function (dataObj, idsSnapshot, force) {
+  api.persistFromData = async function (dataObj, idsSnapshot, force, options = {}) {
     if (!api.available || !sdb) {
       return { ok: false, error: 'SQLite unavailable' };
     }
     const d = dataObj || (typeof data !== 'undefined' ? data : null);
     if (!d) return { ok: false, error: 'No data object' };
 
-    const sig = fullDataSignature(d);
-    if (!force && sig === _lastSyncSig) return { ok: true };
+    const dirtyTables = options && Array.isArray(options.dirtyTables)
+      ? options.dirtyTables.map(String).filter(Boolean)
+      : null;
+    const sig = dirtyTables && dirtyTables.length ? null : fullDataSignature(d);
+    if (!force && sig && sig === _lastSyncSig) return { ok: true };
 
     try {
-      const res = persistFromDataInternal(d, idsSnapshot, !!force);
+      const res = persistFromDataInternal(d, idsSnapshot, !!force, { dirtyTables });
       if (res && res.guard) {
         const g = res.guard;
         api.lastError = `mass-delete guard: refusing to remove ${g.deleting} of ${g.of} rows from "${g.table}" — likely a partial/corrupt state. Not saved.`;
@@ -966,7 +1621,10 @@ window.KoshDB = (function () {
       }
       await saveBytes(exportBytes());
       api.lastSyncAt = new Date().toISOString();
-      _lastSyncSig = sig;
+      if (sig) _lastSyncSig = sig;
+      if (!force && (!dirtyTables || ['transactions', 'credits', 'payments', 'supplier_credits', 'supplier_payments', 'products'].some(t => dirtyTables.includes(t)))) {
+        scheduleNormalizedRebuild(d, idsSnapshot);
+      }
       return { ok: true };
     } catch (err) {
       try { sdb.run('ROLLBACK'); } catch (_) {}
@@ -978,6 +1636,54 @@ window.KoshDB = (function () {
 
   /** Backward-compatible alias */
   api.syncFromData = api.persistFromData;
+
+  function scheduleNormalizedRebuild(dataObj, idsSnapshot) {
+    _normalizedRebuildData = dataObj;
+    _normalizedRebuildIds = idsSnapshot;
+    if (_normalizedRebuildTimer) clearTimeout(_normalizedRebuildTimer);
+    const run = () => {
+      _normalizedRebuildTimer = null;
+      api.rebuildNormalizedFromData(_normalizedRebuildData, _normalizedRebuildIds).catch(err => {
+        console.warn('[KoshDB] Deferred normalized rebuild failed:', err);
+      });
+    };
+    if (typeof requestIdleCallback === 'function') {
+      _normalizedRebuildTimer = setTimeout(() => requestIdleCallback(run, { timeout: 4000 }), 1800);
+    } else {
+      _normalizedRebuildTimer = setTimeout(run, 2500);
+    }
+  }
+
+  api.rebuildNormalizedFromData = async function (dataObj, idsSnapshot) {
+    if (!api.available || !sdb) return { ok: false, error: 'SQLite unavailable' };
+    const d = dataObj || (typeof data !== 'undefined' ? data : null);
+    if (!d) return { ok: false, error: 'No data object' };
+    enableForeignKeys();
+    sdb.run('BEGIN IMMEDIATE');
+    try {
+      metaSet('__sync_mode', 'force');
+      try { sdb.run('PRAGMA defer_foreign_keys = ON'); } catch (_) {}
+      clearNormalizedErpTables();
+      seedSystemProduct();
+      rebuildNormalizedErpTables(d);
+      metaSet('__sync_mode', 'normal');
+      if (idsSnapshot && typeof idsSnapshot === 'object') {
+        Object.keys(idsSnapshot).forEach(k => {
+          if (idsSnapshot[k] !== null && idsSnapshot[k] !== undefined) metaSet(k, idsSnapshot[k]);
+        });
+      }
+      metaSet('savedAt', new Date().toISOString());
+      sdb.run('COMMIT');
+      await saveBytes(exportBytes());
+      api.normalizedStale = false;
+      return { ok: true };
+    } catch (err) {
+      try { sdb.run('ROLLBACK'); } catch (_) {}
+      api.normalizedStale = true;
+      api.lastError = String(err && err.message || err);
+      return { ok: false, error: api.lastError };
+    }
+  };
 
   /** Load authoritative state from SQLite into a plain data object */
   api.loadPrimary = function () {
@@ -1026,6 +1732,11 @@ window.KoshDB = (function () {
     return Object.keys(out).length ? out : null;
   };
 
+  api.getSavedAt = function () {
+    if (!api.available || !sdb) return null;
+    return metaGet('savedAt') || null;
+  };
+
   api.hasBusinessData = function () {
     if (!api.available || !sdb) return false;
     return scalar('SELECT COUNT(*) FROM transactions') > 0 ||
@@ -1049,6 +1760,10 @@ window.KoshDB = (function () {
     const orphanSupPay = scalar('SELECT COUNT(*) FROM supplier_payments WHERE scId NOT IN (SELECT id FROM supplier_credits)');
     if (orphanSupPay > 0) issues.push(`${orphanSupPay} supplier payment(s) with no matching supplier credit`);
 
+    const orphanLoanPay = scalar(`SELECT COUNT(*) FROM loan_payments
+      WHERE loanTxId NOT IN (SELECT id FROM transactions WHERE type = 'capital-in')`);
+    if (orphanLoanPay > 0) issues.push(`${orphanLoanPay} loan payment(s) with no matching loan`);
+
     const orphanTxProd = scalar(`SELECT COUNT(*) FROM transactions t
       WHERE t.productId NOT IN (SELECT id FROM products)`);
     if (orphanTxProd > 0) issues.push(`${orphanTxProd} transaction(s) reference missing product`);
@@ -1063,12 +1778,17 @@ window.KoshDB = (function () {
     if (overpaidSupplier > 0) issues.push(`${overpaidSupplier} supplier credit(s) with paid > total`);
 
     const overpayByRows = scalar(`SELECT COUNT(*) FROM credits c
-      WHERE COALESCE((SELECT SUM(amount) FROM payments WHERE creditId = c.id), 0) > c.total + 0.011`);
-    if (overpayByRows > 0) issues.push(`${overpayByRows} customer credit(s) whose payment rows exceed total`);
+      WHERE COALESCE(c.paid, 0) + COALESCE((SELECT SUM(amount) FROM payments WHERE creditId = c.id), 0) > c.total + 0.011`);
+    if (overpayByRows > 0) issues.push(`${overpayByRows} customer credit(s) whose initial paid + payment rows exceed total`);
 
     const overpaySupByRows = scalar(`SELECT COUNT(*) FROM supplier_credits sc
-      WHERE COALESCE((SELECT SUM(amount) FROM supplier_payments WHERE scId = sc.id), 0) > sc.total + 0.011`);
-    if (overpaySupByRows > 0) issues.push(`${overpaySupByRows} supplier credit(s) whose payment rows exceed total`);
+      WHERE COALESCE(sc.paid, 0) + COALESCE((SELECT SUM(amount) FROM supplier_payments WHERE scId = sc.id), 0) > sc.total + 0.011`);
+    if (overpaySupByRows > 0) issues.push(`${overpaySupByRows} supplier credit(s) whose initial paid + payment rows exceed total`);
+
+    const overpayLoanByRows = scalar(`SELECT COUNT(*) FROM transactions t
+      WHERE t.type = 'capital-in' AND COALESCE(json_extract(t.json, '$.capitalSource'), '') = 'loan'
+        AND COALESCE((SELECT SUM(amount) FROM loan_payments WHERE loanTxId = t.id), 0) > t.total + 0.011`);
+    if (overpayLoanByRows > 0) issues.push(`${overpayLoanByRows} loan(s) whose payment rows exceed total`);
 
     // Party / BD-phone reconciliation.
     // Rule: a CREDIT sale/purchase requires a valid BD phone (full-cash entries
@@ -1146,6 +1866,26 @@ window.KoshDB = (function () {
     } catch (err) {
       console.warn('[KoshDB] autoRepair failed:', err);
       return false;
+    }
+  };
+
+  api.optimize = async function () {
+    if (!api.available || !sdb) return { ok: false, error: 'SQLite unavailable' };
+    try {
+      const src = typeof data !== 'undefined' ? data : null;
+      const beforeBytes = exportBytes().length;
+      const sync = await api.persistFromData(src, typeof getIdsSnapshot === 'function' ? getIdsSnapshot() : null, true);
+      if (!sync.ok) return sync;
+      try { sdb.run('PRAGMA optimize'); } catch (_) {}
+      try { sdb.run('VACUUM'); } catch (_) {}
+      const bytes = exportBytes();
+      await saveBytes(bytes);
+      api.lastSyncAt = new Date().toISOString();
+      return { ok: true, beforeBytes, afterBytes: bytes.length };
+    } catch (err) {
+      api.lastError = String(err && err.message || err);
+      console.warn('[KoshDB] optimize failed:', api.lastError);
+      return { ok: false, error: api.lastError };
     }
   };
 

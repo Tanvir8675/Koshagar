@@ -63,6 +63,14 @@
     if(importPinInput) importPinInput.addEventListener('keypress', (e) => { if(e.key==='Enter') confirmImport(); });
     const autoBackupSettingsBtn = document.getElementById('autoBackupSettingsBtn');
     if(autoBackupSettingsBtn) autoBackupSettingsBtn.addEventListener('click', openAutoBackupModal);
+    const safetyBackupsBtn = document.getElementById('safetyBackupsBtn');
+    if(safetyBackupsBtn) safetyBackupsBtn.addEventListener('click', openSafetyBackupsModal);
+    const safetyRestoreConfirmBtn = document.getElementById('safetyRestoreConfirmBtn');
+    if(safetyRestoreConfirmBtn) safetyRestoreConfirmBtn.addEventListener('click', confirmSafetyRestore);
+    const safetyRestoreCancelBtn = document.getElementById('safetyRestoreCancelBtn');
+    if(safetyRestoreCancelBtn) safetyRestoreCancelBtn.addEventListener('click', closeSafetyRestoreModal);
+    const safetyRestorePinInput = document.getElementById('safetyRestorePinInput');
+    if(safetyRestorePinInput) safetyRestorePinInput.addEventListener('keypress', (e) => { if(e.key==='Enter') confirmSafetyRestore(); });
     const dailyReconcileBtn = document.getElementById('dailyReconcileBtn');
     if(dailyReconcileBtn) dailyReconcileBtn.addEventListener('click', openReconcileModal);
     const runScenarioSuiteBtn = document.getElementById('runScenarioSuiteBtn');
@@ -120,6 +128,7 @@
       document.getElementById('resetPage').style.display = 'none';
       setSessionActive(false);
       setAuthInteractionEnabled(true);
+      document.body.classList.remove('auth-booting');
       setTimeout(() => document.getElementById('loginUserId')?.focus(), 0);
     } else {
       if(hasActiveSession()) {
@@ -132,6 +141,7 @@
         document.getElementById('setupPage').style.display = 'none';
         document.getElementById('resetPage').style.display = 'none';
         document.querySelector('.bottom-nav').style.display = 'flex';
+        document.body.classList.remove('auth-booting');
         showPage('dashboard');
       } else {
         console.log('PIN found, showing login page');
@@ -140,6 +150,7 @@
         document.getElementById('setupPage').style.display = 'none';
         document.getElementById('resetPage').style.display = 'none';
         setAuthInteractionEnabled(true);
+        document.body.classList.remove('auth-booting');
         setTimeout(() => document.getElementById('loginPin')?.focus(), 0);
       }
     }
@@ -177,6 +188,7 @@
       } else {
         showAuthPage('loginPage');
       }
+      document.body.classList.remove('auth-booting');
     } catch (fallbackErr) {
       console.error('Fallback init error:', fallbackErr);
     }
@@ -200,6 +212,7 @@ setTimeout(() => {
     }
     const nav = document.querySelector('.bottom-nav');
     if(nav) nav.style.display = 'none';
+    document.body.classList.remove('auth-booting');
     const loginError = document.getElementById('loginError');
     if(loginError && !loginError.textContent) {
       loginError.textContent = 'Recovery mode: app boot timed out. You can continue from login/setup.';

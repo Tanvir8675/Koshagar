@@ -1,7 +1,7 @@
 // modules/adjustments.js — Stock adjustments (damage / theft / correction)
 // Phase 3 extraction. Classic script sharing index.html's global scope.
 // Depends on globals: data, round2, fmt, toast, todayStr, escapeHtml,
-// dateToYMDLocal, getProd, getStock, getLastPurchasePrice, makeTimeId,
+// dateToYMDLocal, displayDateTime, readAppDateValue, setAppDateValue, getProd, getStock, getLastPurchasePrice, makeTimeId,
 // auditLog, runEngineCommand, requireMonthUnlockOverride, toIsoFromLocalDate,
 // cdInit, cdSetValue, cdClear. Loaded after the main script, before bootstrap.
 
@@ -22,7 +22,7 @@ function fillAdjValueDefault() {
 function populateAdjustForm() {
   if(document.getElementById('cdWrap_adjProduct')) cdInit('adjProduct', data.products || []);
   const adjDateEl = document.getElementById('adjDate');
-  if(adjDateEl && !adjDateEl.value) adjDateEl.value = todayStr();
+  if(adjDateEl && !adjDateEl.value) setAppDateValue(adjDateEl);
   renderAdjustmentList();
 }
 
@@ -32,7 +32,7 @@ function resetAdjFormFields() {
   editingAdjustmentId = null;
   cdClear('adjProduct');
   ['adjQty', 'adjValue', 'adjNote'].forEach(id => { const e = document.getElementById(id); if(e) e.value = ''; });
-  const dateEl = document.getElementById('adjDate'); if(dateEl) dateEl.value = todayStr();
+  const dateEl = document.getElementById('adjDate'); if(dateEl) setAppDateValue(dateEl);
   const typeEl = document.getElementById('adjType'); if(typeEl) typeEl.value = 'damage';
   const btn = document.getElementById('adjSaveBtn'); if(btn) { btn.textContent = 'Record Adjustment'; btn.style.background = 'var(--red)'; }
 }
@@ -40,6 +40,7 @@ function resetAdjFormFields() {
 function cancelEditAdjustment() {
   resetAdjFormFields();
   const sec = document.getElementById('stockAdjustView'); if(sec) sec.style.display = 'none';
+  if(typeof setStockBrowseVisible === 'function') setStockBrowseVisible(true);
 }
 
 function startEditAdjustment(id) {
@@ -53,7 +54,7 @@ function startEditAdjustment(id) {
   set('adjType', tx.adjustmentType || 'damage');
   set('adjQty', tx.qty);
   set('adjValue', tx.cost);
-  set('adjDate', dateToYMDLocal(tx.date));
+  setAppDateValue('adjDate', tx.date);
   set('adjNote', tx.note || '');
   const btn = document.getElementById('adjSaveBtn'); if(btn) { btn.textContent = '✔ Update Adjustment'; btn.style.background = 'var(--blue)'; }
   sec?.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -76,7 +77,7 @@ function renderAdjustmentList() {
     return `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border)">
       <div>
         <div style="font-size:0.82rem;font-weight:600">${escapeHtml(p?.name || String(t.productId))} · ${escapeHtml(label)}</div>
-        <div style="font-size:0.68rem;color:var(--ink2)">${dateToYMDLocal(t.date)} · qty ${fmt(t.qty)}${t.note ? ` · ${escapeHtml(t.note)}` : ''}</div>
+        <div style="font-size:0.68rem;color:var(--ink2)">${displayDateTime(t.date) || dateToYMDLocal(t.date)} · qty ${fmt(t.qty)}${t.note ? ` · ${escapeHtml(t.note)}` : ''}</div>
       </div>
       <div style="display:flex;align-items:center;gap:6px">
         <span style="font-family:'Instrument Serif',serif;font-size:0.95rem;color:var(--red)">-${fmt(round2((Number(t.cost) || 0) * (Number(t.qty) || 0)))}</span>
@@ -92,7 +93,7 @@ async function addStockAdjustment() {
   const type = document.getElementById('adjType')?.value || 'damage';
   const qty = round2(parseFloat(document.getElementById('adjQty')?.value));
   const unitValue = round2(parseFloat(document.getElementById('adjValue')?.value));
-  const date = document.getElementById('adjDate')?.value || todayStr();
+  const date = readAppDateValue('adjDate');
   const note = (document.getElementById('adjNote')?.value || '').trim();
   if(!productId) { toast('⚠️ Select a product'); return; }
   if(!qty || qty <= 0) { toast('⚠️ Enter a valid quantity'); return; }
@@ -151,7 +152,11 @@ async function addStockAdjustment() {
           note,
           date: toIsoFromLocalDate(date)
         });
-        auditLog('tx_saved', { txId: newTxId, type: 'adjustment', adjustmentType: type, qty, value: round2(qty * unitValue) });
+        auditLog('tx_saved', auditTxContext(data.transactions.find(t => String(t.id) === String(newTxId)), {
+          adjustmentType: type,
+          value: round2(qty * unitValue),
+          note
+        }));
       },
       onSuccess: () => {
         const q = document.getElementById('adjQty'); if(q) q.value = '';
@@ -172,6 +177,7 @@ async function deleteStockAdjustment(id) {
     successToast: '🗑️ Adjustment removed',
     mutate: async () => {
       data.transactions = data.transactions.filter(t => !(String(t.id) === String(id) && t.type === 'adjustment'));
+      auditLog('tx_deleted', auditTxContext(tx, { reason: 'stock_adjustment_delete' }));
     }
   });
 }

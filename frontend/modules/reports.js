@@ -3,7 +3,7 @@
 // after the main script. These are UI render functions invoked only at runtime
 // (via showPage('report') / setReportTab), so load order is safe. Depend on
 // many globals: getCentralCalculationBundle, buildCreditMetrics, getProd, fmt,
-// escapeHtml, renderPaged, pgReset, dateToYMDLocal, round2, getSupplierDue,
+// escapeHtml, renderPaged, pgReset, dateToYMDLocal, displayDateTime, round2, getSupplierDue,
 // getSupplierTotalPaid, getCreditDue, getCreditTotalPaid, txReturnGroupRow,
 // txGroupRow, txGroupRowReport, openSupplierPayModal, quickCapitalAdjust,
 // undoInvestmentTx, startEditExpense, deleteExtraExpense, reportTab, data.
@@ -17,14 +17,70 @@ function renderReport() {
     renderPurchaseReport();
   } else if(reportTab === 'credit') {
     renderCreditReport();
+  } else if(reportTab === 'ledger') {
+    renderLedgerReport();
   }
 }
 
-function renderSaleReport() {
-  const rType2 = document.getElementById('rType').value;
-  const rDate2 = document.getElementById('rDate').value || todayStr();
+function renderSaleReportTxList() {
+  const period = getReportPeriodSelection();
   const saleTxQ = (document.getElementById('rSaleTxSearch')?.value||'').toLowerCase().trim();
-  const calc = getCentralCalculationBundle(rType2, rDate2, { saleTxQ });
+  const calc = getCentralCalculationBundle(period.type, period.date, { includeOps: false });
+  const snap = calc.snap || {};
+  const saleTxns = (snap.salesRaw || []).filter(t => (Number(t.qty) || 0) > 0.0001);
+  const saleRetTxns = snap.saleReturnsRaw || [];
+  const allTxns = [...saleTxns, ...saleRetTxns].sort((a, b) => new Date(b.date) - new Date(a.date));
+  const filtered = saleTxQ
+    ? allTxns.filter(t => {
+        const p = getProd(t.productId);
+        return (p?.name || '').toLowerCase().includes(saleTxQ) ||
+               (p?.category || '').toLowerCase().includes(saleTxQ) ||
+               (t.customer || '').toLowerCase().includes(saleTxQ) ||
+               String(t.billId || '').toLowerCase().includes(saleTxQ);
+      })
+    : allTxns;
+  const feed = [
+    ...groupTxnsByBill(filtered.filter(t => t.type === 'sale'), 'sale').map(g => ({ kind: 'bill', date: g.date, payload: g })),
+    ...groupReturnTxns(filtered.filter(t => t.type === 'return' && (t.returnType === 'sale-return' || !t.returnType))).map(g => ({ kind: 'return', date: g.date, payload: g }))
+  ].sort((a,b)=>new Date(b.date)-new Date(a.date));
+  pgReset('rTxList');
+  renderPaged('rTxList', feed, item => item.kind === 'return' ? txReturnGroupRow(item.payload) : txGroupRowReport(item.payload), 'rTxList',
+    '<div class="empty" style="padding:14px"><div class="empty-text">'+(saleTxQ?'No matching transactions':'No transactions')+'</div></div>');
+}
+
+function renderPurchaseReportTxList() {
+  const period = getReportPeriodSelection();
+  const purchTxQ = (document.getElementById('rPurchTxSearch')?.value||'').toLowerCase().trim();
+  const calc = getCentralCalculationBundle(period.type, period.date, { includeBusiness: false, includeOps: false });
+  const snap = calc.snap || {};
+  const purchaseTxns = (snap.purchasesRaw || []).filter(t => (Number(t.qty) || 0) > 0.0001);
+  const purchaseRetTxns = snap.purchaseReturnsRaw || [];
+  const allTxns = [...purchaseTxns, ...purchaseRetTxns].sort((a, b) => new Date(b.date) - new Date(a.date));
+  const filtered = purchTxQ
+    ? allTxns.filter(t => {
+        const p = getProd(t.productId);
+        return (p?.name || '').toLowerCase().includes(purchTxQ) ||
+               (p?.category || '').toLowerCase().includes(purchTxQ) ||
+               (t.supplier || '').toLowerCase().includes(purchTxQ) ||
+               String(t.billId || '').toLowerCase().includes(purchTxQ);
+      })
+    : allTxns;
+  const feed = [
+    ...groupTxnsByBill(filtered.filter(t => t.type === 'purchase'), 'purchase').map(g => ({ kind: 'bill', date: g.date, payload: g })),
+    ...groupReturnTxns(filtered.filter(t => t.type === 'return' && t.returnType === 'purchase-return')).map(g => ({ kind: 'return', date: g.date, payload: g }))
+  ].sort((a,b)=>new Date(b.date)-new Date(a.date));
+  pgReset('rPurchaseTxList');
+  renderPaged('rPurchaseTxList', feed, item => item.kind === 'return' ? txReturnGroupRow(item.payload) : txGroupRowReport(item.payload), 'rPurchaseTxList',
+    '<div class="empty" style="padding:14px"><div class="empty-text">'+(purchTxQ?'No matching transactions':'No transactions')+'</div></div>');
+}
+
+function renderSaleReport() {
+  const period = getReportPeriodSelection();
+  const rType2 = period.type;
+  const rDate2 = period.date;
+  const saleTxQ = (document.getElementById('rSaleTxSearch')?.value||'').toLowerCase().trim();
+  const calc = getCentralCalculationBundle(rType2, rDate2, { saleTxQ, includeOps: false });
+  const actionDate = getPeriodStartDate(rType2, rDate2);
   const snap = calc.snap;
   const metrics = calc.metrics;
   const saleAgg = calc.report.saleReportAgg;
@@ -39,7 +95,9 @@ function renderSaleReport() {
   const periodPayments = metrics.cash.periodPaymentsReceived;
   const periodPurchase = metrics.purchase.cashOutNow;
   const periodPurchasePaid = metrics.purchase.cashPaidAtBuy;
+  const periodPurchaseExtraCost = metrics.purchase.extraCostCashOut || 0;
   const periodSupplierDuePaid = metrics.purchase.supplierDuePaidCashOut;
+  const periodLoanPaymentCashOut = metrics.cash.loanPaymentCashOut || 0;
   const periodPurchaseReturnCashBack = metrics.purchase.purchaseReturnCashIn;
   const periodOpeningCash = metrics.cash.openingCash;
   const periodCapitalCashIn = metrics.cash.capitalCashIn || 0;
@@ -70,7 +128,7 @@ function renderSaleReport() {
         <div style="display:flex;align-items:center;gap:6px">
           <div style="font-weight:700;font-family:'Instrument Serif',serif">${fmt(periodOpeningCash)}</div>
           <input id="reportInvestInput" type="number" min="0" step="0.01" placeholder="Investment" style="width:110px;padding:6px 8px;border:1.5px solid var(--border);border-radius:8px;background:var(--surface);font-family:'Outfit',sans-serif;font-size:0.8rem">
-          <button onclick="quickCapitalAdjust('${rDate2}','capital-in','reportInvestInput')" style="padding:6px 8px;border:none;border-radius:8px;background:var(--green);color:#fff;font-family:'Outfit',sans-serif;font-size:0.74rem;font-weight:700;cursor:pointer">Invest Save</button>
+          <button onclick="quickCapitalAdjust('${actionDate}','capital-in','reportInvestInput')" style="padding:6px 8px;border:none;border-radius:8px;background:var(--green);color:#fff;font-family:'Outfit',sans-serif;font-size:0.74rem;font-weight:700;cursor:pointer">Invest Save</button>
         </div>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0">
@@ -88,8 +146,10 @@ function renderSaleReport() {
         <div style="background:var(--blue-light);border:1px solid var(--border);border-radius:10px;padding:10px">
           <div style="font-size:0.72rem;font-weight:700;color:var(--blue);text-transform:uppercase;margin-bottom:6px">Cost</div>
           <div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Purchase Paid (Cash)</div><div style="font-weight:700;color:var(--blue)">-${fmt(periodPurchasePaid)}</div></div>
+          ${periodPurchaseExtraCost>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Purchase Extra Costing</div><div style="font-weight:700;color:var(--red)">-${fmt(periodPurchaseExtraCost)}</div></div>`:''}
           ${periodSaleReturnCashOut>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Sale Return Refund</div><div style="font-weight:700;color:var(--red)">-${fmt(periodSaleReturnCashOut)}</div></div>`:''}
           ${periodSupplierDuePaid>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Supplier Due Paid</div><div style="font-weight:700;color:var(--blue)">-${fmt(periodSupplierDuePaid)}</div></div>`:''}
+          ${periodLoanPaymentCashOut>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Loan Payment</div><div style="font-weight:700;color:var(--blue)">-${fmt(periodLoanPaymentCashOut)}</div></div>`:''}
           ${periodExtraExpenses>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Extra Expenses</div><div style="font-weight:700;color:var(--red)">-${fmt(periodExtraExpenses)}</div></div>`:''}
           <div style="display:flex;justify-content:space-between;align-items:center;border-top:1px dashed var(--border);margin-top:6px;padding-top:8px">
             <div style="font-size:0.8rem;font-weight:700">Total Cost</div>
@@ -156,7 +216,7 @@ function renderSaleReport() {
     periodCapitalRows,
     t => `
       <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid var(--border)">
-        <div style="font-size:0.78rem;color:var(--ink2)">${dateToYMDLocal(t.date)}${t.reason ? ` · ${escapeHtml(t.reason)}` : ''}</div>
+        <div style="font-size:0.78rem;color:var(--ink2)">${displayDateTime(t.date) || dateToYMDLocal(t.date)}${t.reason ? ` · ${escapeHtml(t.reason)}` : ''}</div>
         <div style="display:flex;align-items:center;gap:6px">
           <div style="font-weight:700;color:var(--green)">+${fmt(t.total)}</div>
           <button onclick="undoInvestmentTx('${t.id}')" style="font-size:0.74rem;padding:2px 7px;border:none;border-radius:7px;background:var(--red);color:#fff;font-weight:700;cursor:pointer">↩ Undo</button>
@@ -227,10 +287,11 @@ function renderSaleReport() {
 }
 
 function renderPurchaseReport() {
-  const rType2 = document.getElementById('rType').value;
-  const rDate2 = document.getElementById('rDate').value || todayStr();
+  const period = getReportPeriodSelection();
+  const rType2 = period.type;
+  const rDate2 = period.date;
   const purchTxQ = (document.getElementById('rPurchTxSearch')?.value||'').toLowerCase().trim();
-  const calc = getCentralCalculationBundle(rType2, rDate2, { purchTxQ });
+  const calc = getCentralCalculationBundle(rType2, rDate2, { purchTxQ, includeBusiness: false, includeOps: false });
   const snap = calc.snap;
   const metrics = calc.metrics;
   const purchAgg = calc.report.purchaseReportAgg;
@@ -324,15 +385,15 @@ function renderPurchaseReport() {
               return `${pr.qty} ${prod?.unit||''} ${prod?.name||'?'}`;
             }).join(', ')
           : `${sc.qty} ${p?.unit||''} ${p?.name||'?'}`;
-        const spayments = (data.supplierPayments||[]).filter(sp=>sp.scId===sc.id);
+        const spayments = (data.supplierPayments||[]).filter(sp=>String(sp.scId)===String(sc.id));
         const payHist = spayments.length>0
-          ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border)">${spayments.map(sp=>`<div style="display:flex;justify-content:space-between;font-size:0.72rem;color:var(--ink2);padding:2px 0"><span>📅 ${dateToYMDLocal(sp.date)}${sp.note?' · '+sp.note:''}</span><span style="color:var(--green);font-weight:700">+${fmt(sp.amount)}</span></div>`).join('')}</div>`
+          ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border)">${spayments.map(sp=>`<div style="display:flex;justify-content:space-between;font-size:0.72rem;color:var(--ink2);padding:2px 0"><span>📅 ${displayDateTime(sp.date) || dateToYMDLocal(sp.date)}${sp.note?' · '+sp.note:''}</span><span style="color:var(--green);font-weight:700">+${fmt(sp.amount)}</span></div>`).join('')}</div>`
           : '';
         return `<div style="padding:12px 0;border-bottom:1px solid var(--border)">
           <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
             <div>
               <div style="font-weight:700;font-size:0.9rem">${sc.supplierName}</div>
-              <div style="font-size:0.72rem;color:var(--ink2)">${dateToYMDLocal(sc.date)} · ${itemsText}</div>
+              <div style="font-size:0.72rem;color:var(--ink2)">${displayDateTime(sc.date) || dateToYMDLocal(sc.date)} · ${itemsText}</div>
             </div>
             <div style="font-family:'Instrument Serif',serif;font-size:1rem;color:var(--red);font-weight:700">${fmt(due)}</div>
           </div>
@@ -348,10 +409,88 @@ function renderPurchaseReport() {
       }).join('');
 }
 
+function renderLedgerReport() {
+  const period = getReportPeriodSelection();
+  const rType2 = period.type;
+  const rDate2 = period.date;
+  const calc = getCentralCalculationBundle(rType2, rDate2, { includeOps: false });
+  const metrics = calc.metrics;
+  const snap = calc.snap || {};
+  const cash = metrics.cash || {};
+  const sales = metrics.sales || {};
+  const business = metrics.business || {};
+
+  const investmentIn = round2(Number(cash.investmentCashIn ?? cash.capitalCashIn) || 0);
+  const loanIn = round2(Number(cash.loanCashIn) || 0);
+  const loanPaid = round2((data.loanPayments || []).reduce((s, p) => s + (Number(p.amount) || 0), 0));
+  const loanDue = round2((typeof getLoanFundingTxs === 'function' ? getLoanFundingTxs() : []).reduce((s, t) => s + (typeof getLoanDue === 'function' ? getLoanDue(t) : 0), 0));
+  const capitalOut = round2(Number(cash.capitalCashOut) || 0);
+  const withdrawals = round2(Number(cash.cashWithdrawalsTotal) || 0);
+  const totalWithdrawal = round2(capitalOut + withdrawals);
+  const openingCash = round2(Number(cash.openingCash) || 0);
+  const businessCapital = round2(openingCash + investmentIn - totalWithdrawal);
+  const businessWorth = round2(Number(business.netBusinessWorth) || 0);
+  const customerCredit = round2(Number(business.customerDueAll) || 0);
+  const supplierCredit = round2(Number(business.supplierDueAll) || 0);
+  const netCreditPosition = round2(customerCredit - supplierCredit);
+  const extraExpense = round2(Number(cash.extraExpensesTotal) || 0);
+  const damageLoss = round2(Number(sales.adjustmentLoss) || 0);
+  const totalProfit = round2(Number(sales.profit) || 0);
+  const netProfitLoss = round2(totalProfit - extraExpense);
+  const stockValue = round2(Number(business.stockValue) || 0);
+  const cashInHand = round2(Number(cash.closingCash) || 0);
+
+  const stat = (label, value, color = 'gold', sub = '') =>
+    `<div class="stat"><div class="stat-label">${label}</div><div class="stat-value ${color}">${fmt(value)}</div>${sub ? `<div class="stat-sub">${sub}</div>` : ''}</div>`;
+  const loanDueStat = () =>
+    `<button type="button" class="stat loan-due-action ${loanDue > 0 ? 'blink' : ''}" onclick="openLoanLedgerPage()">
+      <div class="stat-label">Loan Due</div>
+      <div class="stat-value ${loanDue > 0 ? 'red' : 'green'}">${fmt(loanDue)}</div>
+      <div class="stat-sub">Paid ${fmt(loanPaid)} - Click to view / pay loan</div>
+    </button>`;
+
+  document.getElementById('rLedgerStats').innerHTML = `
+    ${stat('Business Capital', businessCapital, businessCapital >= 0 ? 'green' : 'red', `Opening cash ${fmt(openingCash)} + investment - withdrawal`)}
+    ${stat('Business Worth', businessWorth, businessWorth >= 0 ? 'green' : 'red', `Cash ${fmt(cashInHand)} + stock ${fmt(stockValue)} + customer due - supplier due`)}
+    ${stat('Total Customer Credit', customerCredit, 'green', 'Receivable from customers')}
+    ${stat('Total Supplier Credit', supplierCredit, 'red', 'Payable to suppliers')}
+    ${stat('Net Credit Position', netCreditPosition, netCreditPosition >= 0 ? 'green' : 'red', 'Customer due - supplier due')}
+    ${stat('Total Extra Expense', extraExpense, extraExpense > 0 ? 'red' : 'green')}
+    ${stat('Total Withdrawal', totalWithdrawal, totalWithdrawal > 0 ? 'red' : 'green', `Owner withdrawal ${fmt(withdrawals)}${capitalOut > 0 ? ` + capital out ${fmt(capitalOut)}` : ''}`)}
+    ${stat('Total Investment', investmentIn, 'green')}
+    ${loanIn > 0 ? stat('Total Loan In', loanIn, 'blue') : ''}
+    ${loanIn > 0 ? loanDueStat() : ''}
+    ${stat('Total Profit', totalProfit, totalProfit >= 0 ? 'green' : 'red', damageLoss > 0 ? `Damage/adjustment loss included: ${fmt(damageLoss)}` : 'Damage/adjustment loss included')}
+    ${stat('Net Profit / Loss', netProfitLoss, netProfitLoss >= 0 ? 'green' : 'red', 'After extra expense and damages')}
+  `;
+
+  const rows = [
+    ['Cash in Hand', cashInHand, 'Expected closing cash for selected date'],
+    ['Stock Value', stockValue, 'Current inventory value as of selected date'],
+    ['Customer Due', customerCredit, 'Money customers owe you'],
+    ['Supplier Due', supplierCredit, 'Money you owe suppliers'],
+    ['Investment In', investmentIn, 'Capital added in selected period'],
+    ['Withdrawal / Drawings', totalWithdrawal, 'Owner withdrawals plus capital out'],
+    ['Extra Expenses', extraExpense, 'Expenses outside product purchase cost'],
+    ['Damage / Stock Adjustment Loss', damageLoss, 'Loss from stock adjustments'],
+    ['Profit Before Extra Expense', totalProfit, 'Sales profit after product cost and damages'],
+    ['Net Profit / Loss', netProfitLoss, 'Profit after extra expenses and damages']
+  ];
+
+  document.getElementById('rLedgerSummary').innerHTML = rows.map(([label, value, note]) => `
+    <div class="report-row">
+      <div><div class="report-name">${label}</div><div class="report-qty">${note}</div></div>
+      <div class="report-rev" style="color:${Number(value) < 0 ? 'var(--red)' : 'var(--ink)'}">${fmt(value)}</div>
+    </div>
+  `).join('');
+  if(window.loanLedgerPageOpen) renderLoanLedgerPage();
+}
+
 function renderCreditReport() {
-  const rType2 = document.getElementById('rType').value;
-  const rDate2 = document.getElementById('rDate').value || todayStr();
-  const cm = getCentralCalculationBundle(rType2, rDate2).creditMetrics;
+  const period = getReportPeriodSelection();
+  const rType2 = period.type;
+  const rDate2 = period.date;
+  const cm = getCentralCalculationBundle(rType2, rDate2, { includeBusiness: false, includeOps: false }).creditMetrics;
 
   document.getElementById('rCreditStats').innerHTML=`
     <div class="stat"><div class="stat-label">Total Customer Due</div><div class="stat-value red">${fmt(cm.totalCustomerDue)}</div><div class="stat-sub">${cm.openCustCount} customers</div></div>
@@ -445,11 +584,11 @@ function renderCreditReport() {
         const initialPaid = round2(Number(credit.paid) || 0);
         const pct      = credit.total>0 ? Math.min(100,(paid/credit.total*100)).toFixed(0) : 0;
         const settled  = due<=0;
-        const dateStr  = dateToYMDLocal(credit.date);
-        const payments = data.payments.filter(p=>p.creditId===credit.id);
+        const dateStr  = displayDateTime(credit.date) || dateToYMDLocal(credit.date);
+        const payments = data.payments.filter(p=>String(p.creditId)===String(credit.id));
         const laterPaid = round2(payments.reduce((s, p) => s + (Number(p.amount) || 0), 0));
         const payHist  = payments.length>0
-          ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border)">${initialPaid>0?`<div style="display:flex;justify-content:space-between;font-size:0.72rem;color:var(--ink2);padding:2px 0"><span>📌 ${dateStr} · Initial paid</span><span style="color:var(--green);font-weight:700">+${fmt(initialPaid)}</span></div>`:''}${payments.map(p=>`<div style="display:flex;justify-content:space-between;font-size:0.72rem;color:var(--ink2);padding:2px 0"><span>📅 ${dateToYMDLocal(p.date)}${p.note?' · '+p.note:''}</span><span style="color:var(--green);font-weight:700">+${fmt(p.amount)}</span></div>`).join('')}</div>`
+          ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border)">${initialPaid>0?`<div style="display:flex;justify-content:space-between;font-size:0.72rem;color:var(--ink2);padding:2px 0"><span>📌 ${dateStr} · Initial paid</span><span style="color:var(--green);font-weight:700">+${fmt(initialPaid)}</span></div>`:''}${payments.map(p=>`<div style="display:flex;justify-content:space-between;font-size:0.72rem;color:var(--ink2);padding:2px 0"><span>📅 ${displayDateTime(p.date) || dateToYMDLocal(p.date)}${p.note?' · '+p.note:''}</span><span style="color:var(--green);font-weight:700">+${fmt(p.amount)}</span></div>`).join('')}</div>`
           : `${initialPaid>0?`<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border)"><div style="display:flex;justify-content:space-between;font-size:0.72rem;color:var(--ink2);padding:2px 0"><span>📌 ${dateStr} · Initial paid</span><span style="color:var(--green);font-weight:700">+${fmt(initialPaid)}</span></div></div>`:''}`;
         return `<div style="padding:12px 0;border-bottom:1px solid var(--border)">
           <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
