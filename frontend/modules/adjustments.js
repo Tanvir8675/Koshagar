@@ -80,7 +80,7 @@ function renderAdjustmentList() {
         <div style="font-size:0.68rem;color:var(--ink2)">${displayDateTime(t.date) || dateToYMDLocal(t.date)} · qty ${fmt(t.qty)}${t.note ? ` · ${escapeHtml(t.note)}` : ''}</div>
       </div>
       <div style="display:flex;align-items:center;gap:6px">
-        <span style="font-family:'Instrument Serif',serif;font-size:0.95rem;color:var(--red)">-${fmt(round2((Number(t.cost) || 0) * (Number(t.qty) || 0)))}</span>
+        <span style="font-family:'Instrument Serif',serif;font-size:0.95rem;color:var(--red)">-${fmt(Number.isFinite(Number(t.total)) && Number(t.total) > 0 ? round2(t.total) : round2((Number(t.cost) || 0) * (Number(t.qty) || 0)))}</span>
         <button onclick="startEditAdjustment('${t.id}')" style="background:none;border:none;color:var(--blue);font-size:0.95rem;cursor:pointer;padding:3px 6px;border-radius:6px;opacity:0.75" title="Edit">✏️</button>
         <button onclick="deleteStockAdjustment('${t.id}')" class="del-btn" style="font-size:0.8rem;padding:3px 7px">🗑</button>
       </div>

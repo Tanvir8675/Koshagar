@@ -1549,8 +1549,8 @@ input:checked + .toggle-slider:before { transform: translateX(18px); }
 
 <!-- ADD ENTRY -->
 <div class="page" id="page-entry">
-  <div class="section-title">Add Entry</div>
-  
+  <div class="section-title" id="entryPageTitle">Add Entry</div>
+
   <!-- Edit Transaction Modal (Hidden) -->
   <div class="card" id="editTxForm" style="display:none;background:var(--gold-light);border-color:#e8c47a;margin-bottom:16px">
     <div class="card-label">✏️ Edit Transaction</div>
@@ -1565,8 +1565,10 @@ input:checked + .toggle-slider:before { transform: translateX(18px); }
       </div>
       <input type="hidden" id="etxProduct">
     </div>
-    <div class="form-group"><label>Quantity</label><input type="number" id="etxQty" placeholder="0" min="0.01" step="any"></div>
-    <div class="form-group"><label id="etxPriceLbl">Price per Unit ৳</label><input type="number" id="etxPrice" placeholder="0.00" step="0.01"></div>
+    <div class="form-group"><label>Quantity</label><input type="number" id="etxQty" placeholder="0" min="0.01" step="any" oninput="onEditLineFieldInput()"></div>
+    <div class="form-group" id="etxLineUnitRow" style="display:none"><label>Unit</label>
+      <select id="etxLineUnit" onchange="onEditLineUnitChange()"></select></div>
+    <div class="form-group"><label id="etxPriceLbl">Price per Unit ৳</label><input type="number" id="etxPrice" placeholder="0.00" step="0.01" oninput="onEditLineFieldInput()"></div>
     <div id="etxPurchaseExtraRows" style="display:none">
       <div class="credit-toggle" style="justify-content:flex-end;gap:12px;margin-bottom:10px">
         <span class="credit-toggle-label">Enter total (bulk) price?</span>
@@ -1757,7 +1759,6 @@ input:checked + .toggle-slider:before { transform: translateX(18px); }
   <div class="filter-row" style="margin-bottom:8px">
     <button id="rTabSale" onclick="setReportTab('sale')" class="btn btn-primary" style="flex:1;font-size:0.82rem;padding:8px 4px;background:var(--green)">📈 Sales</button>
     <button id="rTabPurchase" onclick="setReportTab('purchase')" class="btn btn-primary" style="flex:1;font-size:0.82rem;padding:8px 4px;background:var(--surface2);color:var(--ink)">📦 Purchase</button>
-    <button id="rTabCredit" onclick="setReportTab('credit')" class="btn btn-primary" style="flex:1;font-size:0.82rem;padding:8px 4px;background:var(--surface2);color:var(--ink)">💳 Credit</button>
     <button id="rTabLedger" onclick="setReportTab('ledger')" class="btn btn-primary" style="flex:1;font-size:0.82rem;padding:8px 4px;background:var(--surface2);color:var(--ink)">📒 Ledger</button>
   </div>
   <div class="filter-row">
@@ -2019,12 +2020,12 @@ const PHRASE_BN = {
   // —— Entry preview row labels (set by entry type) ——
   'Qty → Unit Cost': 'পরিমাণ → একক দাম',
   'Qty × Sell Price': 'পরিমাণ × বিক্রয় দাম',
-  'Qty × Refund Rate': 'পরিমাণ × ফেরত হার',
+  'Qty × Refund Rate': 'পরিমাণ × ফেরত মূল্যহার',
   'Qty × Return Rate': 'পরিমাণ × ফেরত হার',
   'Qty × Price': 'পরিমাণ × দাম',
-  'Total Cost': 'মোট দাম',
+  'Total Cost': 'মোট খরচ',
   'Total Sale': 'মোট বিক্রয়',
-  'Total Refund': 'মোট ফেরত',
+  'Total Refund': 'মোট ফেরত অর্থ',
   'Total Return': 'মোট ফেরত',
   'Total': 'মোট',
   // —— Login / setup auth errors ——
@@ -2141,7 +2142,7 @@ const PHRASE_BN = {
   '⚠️ Enter a valid amount greater than 0': '⚠️ ০-এর বেশি একটি সঠিক পরিমাণ লিখুন',
   '⚠️ Enter a valid capital amount': '⚠️ সঠিক মূলধনের পরিমাণ লিখুন',
   '⚠️ Enter a valid non-negative amount': '⚠️ ০ বা তার বেশি একটি সঠিক পরিমাণ লিখুন',
-  '⚠️ Enter a valid quantity': '⚠️ সঠিক পরিমাণ লিখুন',
+  '⚠️ Enter a valid quantity': '⚠️ সঠিক সংখ্যা লিখুন',
   '⚠️ Enter the unit cost': '⚠️ একক প্রতি দাম লিখুন',
   '⚠️ Enter the value per unit': '⚠️ একক প্রতি মূল্য লিখুন',
   '⚠️ Fill all fields': '⚠️ সব ঘর পূরণ করুন',
@@ -2216,7 +2217,254 @@ const PHRASE_BN = {
   "❌ Can't save — a closed bill still shows money owed. Please reopen it before making changes.": '❌ সেভ করা যাচ্ছে না — একটি বন্ধ বিলে এখনও পাওনা দেখাচ্ছে। পরিবর্তনের আগে এটি আবার খুলুন।',
   "❌ Can't save — an investment entry is set up incorrectly.": '❌ সেভ করা যাচ্ছে না — একটি ইনভেস্টমেন্ট এন্ট্রি সঠিকভাবে সেট করা হয়নি।',
   "❌ Can't save — the cash totals don't add up for that period. Please review your recent entries.": '❌ সেভ করা যাচ্ছে না — ওই সময়ের নগদের হিসাব মিলছে না। সাম্প্রতিক এন্ট্রিগুলো যাচাই করুন।',
-  "❌ Can't save — this change would make your records inconsistent, so nothing was changed. Please review your entries.": '❌ সেভ করা যাচ্ছে না — এই পরিবর্তনে আপনার হিসাব গরমিল হয়ে যাবে, তাই কিছু পরিবর্তন হয়নি। এন্ট্রিগুলো যাচাই করুন।'
+  "❌ Can't save — this change would make your records inconsistent, so nothing was changed. Please review your entries.": '❌ সেভ করা যাচ্ছে না — এই পরিবর্তনে আপনার হিসাব গরমিল হয়ে যাবে, তাই কিছু পরিবর্তন হয়নি। এন্ট্রিগুলো যাচাই করুন।',
+
+  // —— Full-label additions: applyLanguageDeep matches WHOLE labels, so every
+  // visible string needs its complete text here or it stays English.
+  "📈 Sales": "📈 বিক্রয়",
+  "📦 Purchase": "📦 ক্রয়",
+  "📒 Ledger": "📒 খতিয়ান",
+  "🛒 Sale": "🛒 বিক্রয়",
+  "↩️ Sale Return": "↩️ বিক্রয় ফেরত",
+  "🔄 Purchase Return": "🔄 ক্রয় ফেরত",
+  "↩️ Sale Ret.": "↩️ বিক্রয় ফে.",
+  "🔄 Purch. Ret.": "🔄 ক্রয় ফে.",
+  "Buy/Sale": "ক্রয়/বিক্রয়",
+  "All": "সব",
+  "Continue": "চালিয়ে যান",
+  "Close": "বন্ধ করুন",
+  "Refresh": "রিফ্রেশ করুন",
+  "Restore": "পুনরুদ্ধার করুন",
+  "Run Again": "আবার চালান",
+  "Login": "লগইন",
+  "← Back to Login": "← লগইনে ফিরুন",
+  "Back to Ledger": "খতিয়ানে ফিরুন",
+  "Loading...": "লোড হচ্ছে...",
+  "Loading…": "লোড হচ্ছে…",
+  "Please Confirm": "অনুগ্রহ করে নিশ্চিত করুন",
+  "✅ Save": "✅ সংরক্ষণ করুন",
+  "✅ Save Changes": "✅ পরিবর্তন সংরক্ষণ করুন",
+  "✅ Continue Save": "✅ সংরক্ষণ চালিয়ে যান",
+  "Save Entry": "এন্ট্রি সংরক্ষণ করুন",
+  "Save Business Info": "ব্যবসার তথ্য সংরক্ষণ করুন",
+  "✏️ Edit Transaction": "✏️ লেনদেন সম্পাদনা",
+  "✏️ Edit Payment": "✏️ পরিশোধ সম্পাদনা",
+  "➕ Add Item To Bill": "➕ বিলে পণ্য যোগ করুন",
+  "🧹 Clear Bill": "🧹 বিল খালি করুন",
+  "🖨 Print / Save PDF": "🖨 প্রিন্ট / PDF সংরক্ষণ",
+  "🧾 Invoice": "🧾 চালান",
+  "Add Entry": "এন্ট্রি যোগ করুন",
+  "Product": "পণ্য",
+  "Product name": "পণ্যের নাম",
+  "-- Select product --": "-- পণ্য নির্বাচন করুন --",
+  "Type or pick a product name...": "পণ্যের নাম লিখুন বা বাছুন...",
+  "Type or pick a category...": "ক্যাটাগরি লিখুন বা বাছুন...",
+  "🔍 Type to search...": "🔍 খুঁজতে লিখুন...",
+  "Quantity": "পরিমাণ",
+  "Qty": "পরি.",
+  "Unit": "একক",
+  "Type": "ধরন",
+  "Category": "ক্যাটাগরি",
+  "Name": "নাম",
+  "Spec / Size": "স্পেক / মাপ",
+  "Price per Unit ৳": "প্রতি এককের মূল্য ৳",
+  "Sell Price per Unit ৳": "প্রতি এককের বিক্রয়মূল্য ৳",
+  "Selling Price ৳": "বিক্রয়মূল্য ৳",
+  "Purchase Price": "ক্রয়মূল্য",
+  "Cost Price per Unit ৳ (auto)": "প্রতি এককের ক্রয়মূল্য ৳ (স্বয়ংক্রিয়)",
+  "Cost per unit": "প্রতি এককের খরচ",
+  "Unit cost (purchase price)": "একক খরচ (ক্রয়মূল্য)",
+  "Actual Cost": "প্রকৃত খরচ",
+  "Profit per Unit": "প্রতি এককে মুনাফা",
+  "Company / List Price": "কোম্পানি / তালিকা মূল্য",
+  "Company / List Price ৳": "কোম্পানি / তালিকা মূল্য ৳",
+  "Company / List Price per Unit ৳": "প্রতি এককের কোম্পানি / তালিকা মূল্য ৳",
+  "Discount": "ছাড়",
+  "Discount %": "ছাড় %",
+  "Discount Amount ৳": "ছাড়ের পরিমাণ ৳",
+  "Percent %": "শতাংশ %",
+  "Select Discount Type": "ছাড়ের ধরন নির্বাচন করুন",
+  "Extra Costing": "অতিরিক্ত খরচ",
+  "Extra Costing ৳ (transport, others)": "অতিরিক্ত খরচ ৳ (পরিবহন, অন্যান্য)",
+  "Extra Costing ৳ (transport, others — cash out)": "অতিরিক্ত খরচ ৳ (পরিবহন, অন্যান্য — নগদ ব্যয়)",
+  "Enter total (bulk) price?": "মোট (পাইকারি) মূল্য লিখবেন?",
+  "🧾 Enter total (bulk) price?": "🧾 মোট (পাইকারি) মূল্য লিখবেন?",
+  "Enter total/bulk cost?": "মোট/পাইকারি খরচ লিখবেন?",
+  "1 BOX =": "১ বাক্স =",
+  "1 UNIT =": "১ একক =",
+  "Link to Original Transaction (required for returns)": "মূল লেনদেনের সাথে যুক্ত করুন (ফেরতের জন্য প্রয়োজন)",
+  "Why was this returned?": "কেন ফেরত দেওয়া হয়েছে?",
+  "Return Reason (optional)": "ফেরতের কারণ (ঐচ্ছিক)",
+  "Reason (optional)": "কারণ (ঐচ্ছিক)",
+  "Reason (Required)": "কারণ (আবশ্যক)",
+  "Reason / details": "কারণ / বিবরণ",
+  "Edit reason": "কারণ সম্পাদনা",
+  "Note (optional)": "নোট (ঐচ্ছিক)",
+  "From": "হইতে",
+  "To": "পর্যন্ত",
+  "Month": "মাস",
+  "👤 Customer": "👤 ক্রেতা",
+  "🏪 Supplier": "🏪 সরবরাহকারী",
+  "Customer Name *": "ক্রেতার নাম *",
+  "Customer name": "ক্রেতার নাম",
+  "Enter customer name": "ক্রেতার নাম লিখুন",
+  "Customer Phone (Required for Due)": "ক্রেতার ফোন (বকেয়ার জন্য আবশ্যক)",
+  "Supplier Name": "সরবরাহকারীর নাম",
+  "Supplier Name *": "সরবরাহকারীর নাম *",
+  "Supplier name": "সরবরাহকারীর নাম লিখুন",
+  "Supplier Name (optional)": "সরবরাহকারীর নাম (ঐচ্ছিক)",
+  "Supplier Phone": "সরবরাহকারীর ফোন",
+  "Supplier Phone (optional)": "সরবরাহকারীর ফোন (ঐচ্ছিক)",
+  "Supplier Phone (Required for Due)": "সরবরাহকারীর ফোন (বকেয়ার জন্য আবশ্যক)",
+  "Phone Number": "ফোন নম্বর",
+  "01XXXXXXXXX": "01XXXXXXXXX",
+  "Amount ৳": "পরিমাণ ৳",
+  "Amount Paid Now ৳ (0 if fully on credit)": "এখন পরিশোধিত ৳ (সম্পূর্ণ বাকিতে হলে ০)",
+  "Amount Paying Now ৳": "এখন পরিশোধের পরিমাণ ৳",
+  "Amount Received Now ৳ (0 if full credit)": "এখন প্রাপ্ত ৳ (সম্পূর্ণ বাকিতে হলে ০)",
+  "Amount Receiving Now ৳": "এখন গ্রহণের পরিমাণ ৳",
+  "Funding Amount ৳": "তহবিলের পরিমাণ ৳",
+  "Source of Money": "অর্থের উৎস",
+  "💳 Is this a credit sale?": "💳 এটি কি বাকিতে বিক্রয়?",
+  "💳 Paying partially (supplier credit)?": "💳 আংশিক পরিশোধ (সরবরাহকারীর বাকি)?",
+  "💰 Record Payment": "💰 পরিশোধ লিপিবদ্ধ করুন",
+  "💳 Record Loan Payment": "💳 ঋণ পরিশোধ লিপিবদ্ধ করুন",
+  "🏪 Pay Supplier": "🏪 সরবরাহকারীকে পরিশোধ",
+  "Paid": "পরিশোধিত",
+  "Paid Now": "এখন পরিশোধিত",
+  "Already Paid": "পূর্বে পরিশোধিত",
+  "Outstanding": "বকেয়া",
+  "Still Due": "এখনও বকেয়া",
+  "Still Outstanding": "এখনও অপরিশোধিত",
+  "Settled": "নিষ্পত্তি হয়েছে",
+  "Settlement Status": "নিষ্পত্তির অবস্থা",
+  "Remaining after payment": "পরিশোধের পর অবশিষ্ট",
+  "Supplier Due": "সরবরাহকারীর বকেয়া",
+  "Cash in Hand": "হাতে নগদ",
+  "Owner Investment": "মালিকের বিনিয়োগ",
+  "Loan": "ঋণ",
+  "Total Loan": "মোট ঋণ",
+  "Due Loans": "বকেয়া ঋণ",
+  "Loan Ledger": "ঋণ খতিয়ান",
+  "Loan Giver / Bank Name": "ঋণদাতা / ব্যাংকের নাম",
+  "Loan Payment Last Date": "ঋণ পরিশোধের শেষ তারিখ",
+  "Settled Loan History": "নিষ্পত্তিকৃত ঋণের ইতিহাস",
+  "Name or bank": "নাম বা ব্যাংক",
+  "e.g. cash, bkash...": "যেমন নগদ, বিকাশ...",
+  "e.g. cash, bank transfer": "যেমন নগদ, ব্যাংক ট্রান্সফার",
+  "e.g. Opening balance": "যেমন প্রারম্ভিক জের",
+  "e.g. purchase price": "যেমন ক্রয়মূল্য",
+  "💵 Purchase Funding Needed": "💵 ক্রয়ের জন্য প্রয়োজনীয় তহবিল",
+  "Purchase Cash-out": "ক্রয়ে নগদ ব্যয়",
+  "Stock Management": "মজুত ব্যবস্থাপনা",
+  "📉 Stock Adjustment": "📉 মজুত সমন্বয়",
+  "📉 Stock Adjustment (Damage / Theft / Correction)": "📉 মজুত সমন্বয় (ক্ষতি / চুরি / সংশোধন)",
+  "📥 Opening Stock": "📥 প্রারম্ভিক মজুত",
+  "📥 Opening / Initial Stock": "📥 প্রারম্ভিক / প্রাথমিক মজুত",
+  "Record Opening Stock": "প্রারম্ভিক মজুত লিপিবদ্ধ করুন",
+  "Opening Stock Entries": "প্রারম্ভিক মজুতের এন্ট্রি",
+  "Record Adjustment": "সমন্বয় লিপিবদ্ধ করুন",
+  "Recent Adjustments": "সাম্প্রতিক সমন্বয়",
+  "Damage": "ক্ষতি",
+  "Theft": "চুরি",
+  "Shortage": "ঘাটতি",
+  "Correction": "সংশোধন",
+  "Quantity in hand": "হাতে থাকা পরিমাণ",
+  "Quantity removed": "বাদ দেওয়া পরিমাণ",
+  "Value per unit (your loss valuation — old or new price)": "প্রতি এককের মূল্য (আপনার ক্ষতির মূল্যায়ন — পুরাতন বা নতুন মূল্য)",
+  "Add Product": "পণ্য যোগ করুন",
+  "Add New Product": "নতুন পণ্য যোগ করুন",
+  "Edit Product": "পণ্য সম্পাদনা",
+  "Your Products": "আপনার পণ্যসমূহ",
+  "🔍 Search product or category...": "🔍 পণ্য বা ক্যাটাগরি খুঁজুন...",
+  "📅 Daily": "📅 দৈনিক",
+  "📆 Weekly": "📆 সাপ্তাহিক",
+  "📊 Monthly": "📊 মাসিক",
+  "🗓️ Monthly": "🗓️ মাসিক",
+  "🗓 Yearly (YTD)": "🗓 বার্ষিক (YTD)",
+  "🗓 Custom Date": "🗓 নির্দিষ্ট তারিখ",
+  "Transactions": "লেনদেনসমূহ",
+  "Credit Transactions": "বাকির লেনদেন",
+  "Purchase Transactions": "ক্রয় লেনদেন",
+  "Today's Sales": "আজকের বিক্রয়",
+  "Today's Purchases": "আজকের ক্রয়",
+  "↩️ Today's Returns": "↩️ আজকের ফেরত",
+  "💵 Today's Cash Summary": "💵 আজকের নগদ সারসংক্ষেপ",
+  "💳 Credit Summary": "💳 বাকির সারসংক্ষেপ",
+  "Credit / Accounts": "বাকি / হিসাব",
+  "Breakdown by Product": "পণ্যভিত্তিক বিভাজন",
+  "Breakdown by Category": "ক্যাটাগরিভিত্তিক বিভাজন",
+  "Supplier Summary": "সরবরাহকারীর সারসংক্ষেপ",
+  "Ledger Summary": "খতিয়ানের সারসংক্ষেপ",
+  "Top Products": "শীর্ষ পণ্যসমূহ",
+  "Top Purchased Products": "সর্বাধিক ক্রয়কৃত পণ্য",
+  "🚀 Fast Selling Products": "🚀 দ্রুত বিক্রিত পণ্য",
+  "🐢 Slow Selling Products": "🐢 ধীরে বিক্রিত পণ্য",
+  "Product Profitability (Fast vs Slow)": "পণ্যের লাভজনকতা (দ্রুত বনাম ধীর)",
+  "Payment Trend": "পরিশোধের ধারা",
+  "Outstanding Balance by Customer": "ক্রেতাভিত্তিক বকেয়া",
+  "Outstanding Balance by Supplier": "সরবরাহকারীভিত্তিক বকেয়া",
+  "⚠️ Outstanding Supplier Dues": "⚠️ সরবরাহকারীর অপরিশোধিত বকেয়া",
+  "Total Sale Amount": "মোট বিক্রয়ের পরিমাণ",
+  "Total Purchase Amount": "মোট ক্রয়ের পরিমাণ",
+  "Total Profit": "মোট মুনাফা",
+  "🔍 Search product/customer/bill...": "🔍 পণ্য/ক্রেতা/বিল খুঁজুন...",
+  "🔍 Search product/supplier/bill...": "🔍 পণ্য/সরবরাহকারী/বিল খুঁজুন...",
+  "🔍 Search customer or supplier...": "🔍 ক্রেতা বা সরবরাহকারী খুঁজুন...",
+  "🔍 Search by customer/supplier/product/date/invoice...": "🔍 ক্রেতা/সরবরাহকারী/পণ্য/তারিখ/চালান দিয়ে খুঁজুন...",
+  "⚙️ Settings": "⚙️ সেটিংস",
+  "🏪 Shop Info": "🏪 দোকানের তথ্য",
+  "Shop Name (Invoice Header)": "দোকানের নাম (চালানের শিরোনাম)",
+  "Shop Address": "দোকানের ঠিকানা",
+  "Shop Mobile": "দোকানের মোবাইল",
+  "Enter shop name": "দোকানের নাম লিখুন",
+  "Enter shop address": "দোকানের ঠিকানা লিখুন",
+  "🔐 Account": "🔐 অ্যাকাউন্ট",
+  "🌐 Language: English": "🌐 ভাষা: বাংলা",
+  "🔑 Set Security PIN": "🔑 নিরাপত্তা পিন সেট করুন",
+  "🔄 Reset PIN": "🔄 পিন রিসেট করুন",
+  "Admin PIN": "অ্যাডমিন পিন",
+  "Security question": "নিরাপত্তা প্রশ্ন",
+  "Write your own security question": "নিজের নিরাপত্তা প্রশ্ন লিখুন",
+  "Your answer (case-insensitive)": "আপনার উত্তর (বড়-ছোট হাতের পার্থক্য নেই)",
+  "💾 Backup & Restore": "💾 ব্যাকআপ ও পুনরুদ্ধার",
+  "📤 Export Data (Backup)": "📤 তথ্য রপ্তানি (ব্যাকআপ)",
+  "📥 Import Data (Restore)": "📥 তথ্য আমদানি (পুনরুদ্ধার)",
+  "📥 Import Data": "📥 তথ্য আমদানি",
+  "⏰ Auto Backup": "⏰ স্বয়ংক্রিয় ব্যাকআপ",
+  "🛟 Safety Backups": "🛟 নিরাপত্তা ব্যাকআপ",
+  "Restore Safety Backup": "নিরাপত্তা ব্যাকআপ পুনরুদ্ধার",
+  "Enter PIN to restore this snapshot.": "এই সংরক্ষিত অনুলিপি ফেরাতে পিন দিন।",
+  "Automatic snapshots taken before import, reset, delete-by-date, and restore.": "আমদানি, রিসেট, তারিখ অনুযায়ী মুছে ফেলা ও পুনরুদ্ধারের আগে স্বয়ংক্রিয়ভাবে অনুলিপি রাখা হয়।",
+  "Choose import mode and enter PIN to confirm.": "আমদানির ধরন বাছুন এবং নিশ্চিত করতে পিন দিন।",
+  "🔄 Replace All": "🔄 সব প্রতিস্থাপন",
+  "➕ Merge": "➕ একত্র করুন",
+  "🔄 Replace: current data will be deleted and replaced with backup.": "🔄 প্রতিস্থাপন: বর্তমান তথ্য মুছে ব্যাকআপ দিয়ে প্রতিস্থাপিত হবে।",
+  "The app will backup automatically — just choose your frequency": "অ্যাপ স্বয়ংক্রিয়ভাবে ব্যাকআপ নেবে — শুধু সময়সীমা বাছুন",
+  "Takes one backup every day when app opens": "অ্যাপ খুললে প্রতিদিন একটি ব্যাকআপ নেয়",
+  "Takes one backup every 7 days": "প্রতি ৭ দিনে একটি ব্যাকআপ নেয়",
+  "Takes one backup every 30 days": "প্রতি ৩০ দিনে একটি ব্যাকআপ নেয়",
+  "Auto backup will be disabled": "স্বয়ংক্রিয় ব্যাকআপ বন্ধ থাকবে",
+  "🚫 Off": "🚫 বন্ধ",
+  "🛠 System": "🛠 সিস্টেম",
+  "🧮 Daily Reconcile": "🧮 দৈনিক মিলকরণ",
+  "🧪 Scenario Test Suite": "🧪 পরিস্থিতি পরীক্ষা",
+  "🧱 Database Health Check": "🧱 ডেটাবেজ স্বাস্থ্য পরীক্ষা",
+  "🧾 Last Save Error": "🧾 সর্বশেষ সংরক্ষণ ত্রুটি",
+  "📜 Audit Trail": "📜 নিরীক্ষা তালিকা",
+  "🧹 Data Cleanup": "🧹 তথ্য পরিচ্ছন্নকরণ",
+  "Immutable action history (latest first).": "অপরিবর্তনীয় কার্যক্রমের ইতিহাস (সর্বশেষ আগে)।",
+  "Critical mismatch scan for stock, money, and ledger linkages.": "মজুত, অর্থ ও খতিয়ানের সংযোগে গুরুতর গরমিল পরীক্ষা।",
+  "Runs built-in calculation scenarios in sandbox mode (does not modify live data).": "নিরাপদ পরিবেশে অন্তর্নির্মিত হিসাব পরীক্ষা চালায় (সরাসরি তথ্য পরিবর্তন করে না)।",
+  "Review old credit records that need phone cleanup. This screen does not change data.": "ফোন নম্বর সংশোধন প্রয়োজন এমন পুরনো বাকির রেকর্ড দেখুন। এই পর্দা তথ্য পরিবর্তন করে না।",
+  "Deletes all transactions on the selected date. Reports update automatically.": "নির্বাচিত তারিখের সব লেনদেন মুছে ফেলে। প্রতিবেদন স্বয়ংক্রিয়ভাবে হালনাগাদ হয়।",
+  "This will delete all products and transactions. This cannot be undone.": "এটি সব পণ্য ও লেনদেন মুছে ফেলবে। এটি আর ফেরানো যাবে না।",
+  "🔒 Toggle Month Lock": "🔒 মাসের তালা পরিবর্তন",
+  "🔒 Toggle Selected Month Lock": "🔒 নির্বাচিত মাসের তালা পরিবর্তন",
+  "🔐 Month Override Required": "🔐 মাসের অনুমোদন প্রয়োজন",
+  "Choose month and enter admin PIN.": "মাস বাছুন এবং অ্যাডমিন পিন দিন।",
+  "Locked month action requires admin PIN and reason.": "তালাবদ্ধ মাসের কাজে অ্যাডমিন পিন ও কারণ প্রয়োজন।",
+  "Why this override?": "কেন এই অনুমোদন?"
 };
 const PHRASE_EN = Object.fromEntries(Object.entries(PHRASE_BN).map(([en, bn]) => [bn, en]));
 
@@ -2251,15 +2499,20 @@ function applyLanguageDeep(root = document.body) {
     const original = node.nodeValue;
     const trimmed = (original || '').trim();
     if(!trimmed) return;
-    const translated = trPhraseLoose(trimmed);
+    // WHOLE-LABEL match only. trPhraseLoose does substring replacement, which
+    // half-translated labels: the key "Stock" turned "Stock Management" into
+    // "মজুত Management", "Total" turned "Total Profit" into "মোট Profit", and so on
+    // for 59 labels. A label must be fully Bangla or fully English, never both — so
+    // an unlisted label stays English until its complete text is added to PHRASE_BN.
+    const translated = trPhrase(trimmed);
     if(translated !== trimmed) {
       node.nodeValue = original.replace(trimmed, translated);
     }
   });
   root.querySelectorAll('input[placeholder], textarea[placeholder]').forEach((el) => {
     const p = el.getAttribute('placeholder');
-    const np = trPhraseLoose(p);
-    if(np !== p) el.setAttribute('placeholder', np);
+    const np = trPhrase((p || '').trim());
+    if(np !== (p || '').trim()) el.setAttribute('placeholder', np);
   });
 }
 
@@ -2305,10 +2558,39 @@ function applyLanguage() {
   applyLanguageDeep(document.body);
 }
 
+// applyLanguageDeep only runs on language toggle and page navigation, so anything
+// the app re-renders afterwards (a saved entry, a pagination click, a refreshed
+// report) came back in English even when Bangla was selected. This observer
+// translates freshly inserted subtrees so re-rendered lists stay in one language.
+let __i18nObserver = null;
+let __i18nApplying = false;
+function startLanguageObserver() {
+  if(__i18nObserver || typeof MutationObserver === 'undefined' || !document.body) return;
+  __i18nObserver = new MutationObserver((mutations) => {
+    // English needs no pass: JS renders English, so untouched nodes are correct.
+    if(currentLang !== 'bn' || __i18nApplying) return;
+    const roots = [];
+    for(const m of mutations) {
+      for(const node of m.addedNodes) {
+        if(node.nodeType === 1) roots.push(node); // ELEMENT_NODE
+      }
+    }
+    if(!roots.length) return;
+    // Re-entrancy guard: translating edits text nodes, and we must not process our
+    // own edits as new work.
+    __i18nApplying = true;
+    try { roots.forEach(r => applyLanguageDeep(r)); }
+    catch(e) { console.warn('language pass on new content failed:', e); }
+    finally { __i18nApplying = false; }
+  });
+  __i18nObserver.observe(document.body, { childList: true, subtree: true });
+}
+
 function setLanguage(lang) {
   currentLang = (lang === 'bn') ? 'bn' : 'en';
   storageSet('local', 'myshop-lang', currentLang);
   applyLanguage();
+  startLanguageObserver();
 }
 
 function toggleLanguage() {
@@ -2977,11 +3259,8 @@ async function handleLogin() {
     if(typeof loadData === 'function') {
       await loadData();
     }
-    // Ensure cloud documents exist right after successful login.
-    if(navigator.onLine) {
-      await ensureAuthProfileInFirestore();
-      await saveDataToFirestore();
-    }
+    // Data source of truth is local SQLite only. Cloud auth may exist, but app
+    // data is not pushed to Firestore/backend during login.
     if(typeof updateDataLists === 'function') {
       updateDataLists();
     }
@@ -2997,6 +3276,12 @@ async function handleLogin() {
       setSyncUI('offline');
     }
   }
+  // Apply the SAVED language before the first paint. Without this, applyLanguage()
+  // only ever ran from the toggle, so reopening the app in Bangla came back with an
+  // English nav/header and only the page you navigated to got translated — the
+  // single biggest source of mixed EN/BN text.
+  if(typeof applyLanguage === 'function') applyLanguage();
+  if(typeof startLanguageObserver === 'function') startLanguageObserver();
   if(typeof showPage === 'function') {
     showPage('dashboard');
   } else if(typeof renderDashboard === 'function') {
@@ -3148,11 +3433,36 @@ window.addEventListener('error', (ev) => {
 
 // —— STORAGE (IndexedDB + LocalStorage) ——————————————————————————————————————
 let db=null;
-const APP_STORAGE_SCOPE = 'dailyexpense-update';
-const FIRESTORE_SCOPE_FALLBACKS = ['default', 'discount-update'];
+
+// DEV / PROD ISOLATION — the single most important safety rule in this file.
+//
+// A local build talks to the SAME Firebase project as the deployed app, so
+// without this guard `npm run dev` on localhost reads and writes the very same
+// Firestore document as the live shop — and one stray local save would overwrite
+// real business data.
+//
+// Everything the app stores is namespaced by APP_STORAGE_SCOPE: the Firestore
+// document path (users/<uid>/appData/<scope>), the IndexedDB database name, and
+// every localStorage key. Suffixing the scope on localhost therefore isolates dev
+// from production completely — different cloud document AND different local
+// database — with no other change anywhere in the app.
+const KOSH_IS_DEV = (() => {
+  const h = String(location.hostname || '');
+  return h === 'localhost' || h === '127.0.0.1' || h === '[::1]' || h === '::1'
+      || /^192\.168\./.test(h) || /^10\./.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h);
+})();
+const PROD_STORAGE_SCOPE = 'dailyexpense-update';
+const APP_STORAGE_SCOPE = KOSH_IS_DEV ? `${PROD_STORAGE_SCOPE}-dev` : PROD_STORAGE_SCOPE;
+// Fallback scopes are read-only legacy lookups. In dev they must never name a
+// production scope, or a dev session could still pull live data down.
+const FIRESTORE_SCOPE_FALLBACKS = KOSH_IS_DEV ? [] : ['default', 'discount-update'];
+if (KOSH_IS_DEV) {
+  console.warn(`[KoshAgar] DEV MODE — storage scope "${APP_STORAGE_SCOPE}". Production data is not reachable from here.`);
+}
 const DB_NAME = `MyShopDB_${APP_STORAGE_SCOPE}`;
 const DATA_KEY = `myshop-data:${APP_STORAGE_SCOPE}`;
 const IDS_KEY = `myshop-ids:${APP_STORAGE_SCOPE}`;
+const DATA_META_KEY = `myshop-meta:${APP_STORAGE_SCOPE}`;
 // Persisted draft of the in-progress entry/bill so it survives app switches & reloads.
 const ENTRY_DRAFT_KEY = `myshop-entrydraft:${APP_STORAGE_SCOPE}`;
 const LEGACY_DATA_KEY = 'myshop-data';
@@ -3167,12 +3477,23 @@ function getFirestoreDocPath() {
 }
 
 function buildFirestoreDocUrl() {
+  assertScopeAllowed(APP_STORAGE_SCOPE);
   return "https://firestore.googleapis.com/v1/projects/" + FIREBASE_PROJECT_ID + "/databases/(default)/documents/" + getFirestoreDocPath() + "?key=" + FIREBASE_API_KEY;
 }
 
 function buildFirestoreDocUrlForScope(scope) {
+  assertScopeAllowed(scope);
   const uid = normalizeUserId(currentUserId || storageGet('local', AUTH_KEYS.lastUser) || '');
   return "https://firestore.googleapis.com/v1/projects/" + FIREBASE_PROJECT_ID + "/databases/(default)/documents/users/" + (uid || 'guest') + "/appData/" + scope + "?key=" + FIREBASE_API_KEY;
+}
+
+// Belt-and-braces companion to KOSH_IS_DEV: even if some future code path passes a
+// scope in by hand, a dev session can never address a production document. Throws
+// rather than returning a bad URL — a loud failure in dev is the point.
+function assertScopeAllowed(scope) {
+  if (KOSH_IS_DEV && !String(scope || '').endsWith('-dev')) {
+    throw new Error(`[KoshAgar] Blocked: dev build tried to reach production scope "${scope}".`);
+  }
 }
 
 function parseFirestoreJsonField(doc, fieldName) {
@@ -3250,6 +3571,8 @@ function repairNextIdsFromData() {
 }
 
 async function loadDataFromFirestore() {
+  // Single source of truth: app data loads only from KoshDB SQLite.
+  return false;
   if(window.__syncLockout) return false; // P1.1: no concurrent cloud loads
   window.__syncLockout = true;
   try {
@@ -3300,17 +3623,22 @@ async function loadDataFromFirestore() {
 }
 
 async function saveDataToFirestore() {
+  // Single source of truth: app data writes only to KoshDB SQLite.
+  return false;
   window.__pendingCloudSave = true; // P1.1: mark cloud save in flight
   try {
     if(!normalizeUserId(currentUserId)) { window.__pendingCloudSave = false; return false; }
     const cloudAuth = await loadAuthFromFirestore(currentUserId);
     if(!cloudAuth?.pinHash) { window.__pendingCloudSave = false; return false; }
+    const updatedAtIso = window.__localDataUpdatedAt
+      ? new Date(window.__localDataUpdatedAt).toISOString()
+      : new Date().toISOString();
     const body = {
       fields: {
         scope: { stringValue: APP_STORAGE_SCOPE },
         dataJson: { stringValue: JSON.stringify(data) },
         idsJson: { stringValue: JSON.stringify(getIdsSnapshot()) },
-        updatedAt: { timestampValue: new Date().toISOString() }
+        updatedAt: { timestampValue: updatedAtIso }
       }
     };
     // P5.3: retry transient (5xx/timeout) failures with backoff. PATCH is a full
@@ -4489,6 +4817,49 @@ async function loadFromRelationalSQLite() {
   return true;
 }
 
+async function loadFromJsonBackup() {
+  let d = null;
+  let ids = null;
+  let meta = null;
+  if(db) {
+    const tx = db.transaction('data', 'readonly');
+    const os = tx.objectStore('data');
+    d = await new Promise((r,e)=>{const req=os.get(DATA_KEY);req.onsuccess=()=>r(req.result);req.onerror=e;});
+    ids = await new Promise((r,e)=>{const req=os.get(IDS_KEY);req.onsuccess=()=>r(req.result);req.onerror=e;});
+    meta = await new Promise((r,e)=>{const req=os.get(DATA_META_KEY);req.onsuccess=()=>r(req.result);req.onerror=e;});
+    if(!d) d = await new Promise((r,e)=>{const req=os.get(LEGACY_DATA_KEY);req.onsuccess=()=>r(req.result);req.onerror=e;});
+    if(!ids) ids = await new Promise((r,e)=>{const req=os.get(LEGACY_IDS_KEY);req.onsuccess=()=>r(req.result);req.onerror=e;});
+    if(!d) d = await readLegacyDbValue('MyShopDB', LEGACY_DATA_KEY);
+    if(!ids) ids = await readLegacyDbValue('MyShopDB', LEGACY_IDS_KEY);
+    if(!d) d = await readLegacyDbValue('MyShopDB_discount-update', 'myshop-data:discount-update');
+    if(!ids) ids = await readLegacyDbValue('MyShopDB_discount-update', 'myshop-ids:discount-update');
+    if(!d) d = await readLegacyDbValue('MyShopDB_dailyexpense-update', 'myshop-data:dailyexpense-update');
+    if(!ids) ids = await readLegacyDbValue('MyShopDB_dailyexpense-update', 'myshop-ids:dailyexpense-update');
+  } else {
+    const metaRaw = storageGet('local', DATA_META_KEY);
+    d = storageGet('local', DATA_KEY) ?? storageGet('local', LEGACY_DATA_KEY);
+    ids = storageGet('local', IDS_KEY) ?? storageGet('local', LEGACY_IDS_KEY);
+    if(metaRaw) meta = { value: metaRaw };
+  }
+
+  if(!d) return false;
+  let savedAtMs = 0;
+  try {
+    const parsedMeta = meta?.value ? JSON.parse(meta.value) : null;
+    savedAtMs = parsedMeta?.savedAt ? new Date(parsedMeta.savedAt).getTime() : 0;
+  } catch(_) {}
+  const currentLocalTs = window.__localDataUpdatedAt || 0;
+  if(currentLocalTs > 0 && savedAtMs > 0 && savedAtMs <= currentLocalTs) return false;
+  if(currentLocalTs > 0 && savedAtMs === 0 && window.KoshDB && KoshDB.available) return false;
+
+  data = JSON.parse(d.value || d);
+  if(ids) parseIdsSnapshot(JSON.parse(ids.value || ids));
+  if(savedAtMs > 0) window.__localDataUpdatedAt = savedAtMs;
+  else if(!window.__localDataUpdatedAt) window.__localDataUpdatedAt = Date.now();
+  console.log('[KoshDB] Loaded from JSON backup —', (data.transactions || []).length, 'transactions');
+  return true;
+}
+
 async function migrateInMemoryDataToSqlite(force) {
   if(!window.KoshDB || !KoshDB.available) return true;
   if(!force && KoshDB.hasBusinessData()) return true;
@@ -4509,15 +4880,21 @@ function scheduleJsonBackup(idsSnapshot, delayMs = 900) {
 }
 
 async function writeJsonBackup(idsSnapshot = getIdsSnapshot()) {
+  const savedAt = window.__localDataUpdatedAt
+    ? new Date(window.__localDataUpdatedAt).toISOString()
+    : new Date().toISOString();
+  const meta = { savedAt, scope: APP_STORAGE_SCOPE };
   if(db) {
     const tx = db.transaction('data', 'readwrite');
     const os = tx.objectStore('data');
     os.put({ key: DATA_KEY, value: JSON.stringify(data) });
     os.put({ key: IDS_KEY, value: JSON.stringify(idsSnapshot) });
+    os.put({ key: DATA_META_KEY, value: JSON.stringify(meta) });
     await new Promise((r, e) => { tx.oncomplete = r; tx.onerror = e; });
   } else {
     storageSet('local', DATA_KEY, JSON.stringify(data));
     storageSet('local', IDS_KEY, JSON.stringify(idsSnapshot));
+    storageSet('local', DATA_META_KEY, JSON.stringify(meta));
   }
 }
 
@@ -4546,105 +4923,68 @@ async function saveData({ force = false, skipReconcile = false, dirtyTables = nu
   try {
     invalidateCoreCalcState();
     if(!skipReconcile) reconcileDataConsistency();
-    window.__localDataUpdatedAt = Date.now();
+    const localSavedAt = Date.now();
+    window.__localDataUpdatedAt = localSavedAt;
     window.__dataIsStale = false;
     const idsSnapshot = getIdsSnapshot();
 
     // Relational SQLite FIRST — source of truth (FK/CHECK enforced).
-    if(window.KoshDB && KoshDB.available) {
-      // Normal edits use SQLite's incremental sync path. Force is reserved for
-      // deliberate bulk rebuilds such as import/reset/date-wipe.
-      const dbResult = await KoshDB.persistFromData(data, idsSnapshot, !!force, { dirtyTables });
-      if(!dbResult.ok) {
-        const raw = dbResult.error || 'Database constraint violation';
-        window.__lastSaveError = { at: new Date().toISOString(), source: 'sqlite', raw };
-        toast(humanizeSaveError(raw));
-        console.error('Database save failed:', raw);
-        setSyncUI('offline');
-        throw new Error(raw);
-      }
+    if(!window.KoshDB || !KoshDB.available) {
+      const raw = window.KoshDB?.lastError
+        ? `SQLite database is not available: ${window.KoshDB.lastError}`
+        : 'SQLite database is not available. Data was not saved.';
+      window.__lastSaveError = { at: new Date().toISOString(), source: 'sqlite', raw };
+      toast(humanizeSaveError(raw));
+      console.error('Database save failed:', raw);
+      setSyncUI('offline');
+      throw new Error(raw);
     }
 
-    // JSON backup to IndexedDB / localStorage (secondary cache for recovery).
-    if(deferJsonBackup && window.KoshDB && KoshDB.available) {
-      scheduleJsonBackup(idsSnapshot);
-    } else {
-      await writeJsonBackup(idsSnapshot);
+    // Normal edits use SQLite's incremental sync path. Force is reserved for
+    // deliberate bulk rebuilds such as import/reset/date-wipe.
+    const dbResult = await KoshDB.persistFromData(data, idsSnapshot, !!force, { dirtyTables });
+    if(!dbResult.ok) {
+      const raw = dbResult.error || 'Database constraint violation';
+      window.__lastSaveError = { at: new Date().toISOString(), source: 'sqlite', raw };
+      toast(humanizeSaveError(raw));
+      console.error('Database save failed:', raw);
+      setSyncUI('offline');
+      throw new Error(raw);
     }
     localSaved = true;
   } catch(e) {
-    if(window.KoshDB && KoshDB.available) throw e;
-    try {
-      storageSet('local', DATA_KEY, JSON.stringify(data));
-      storageSet('local', IDS_KEY, JSON.stringify(getIdsSnapshot()));
-      localSaved = true;
-    } catch(storageError) {
-      console.warn('Local save failed:', storageError);
-    }
+    throw e;
   }
 
   if(localSaved) window.__lastLocalSaveTime = Date.now();
   if(window.cacheManager) cacheManager.invalidate('');
   if(localSaved) {
-    ensureAuthProfileInFirestore().catch(() => {});
-    saveDataToBackend().catch(() => {});              // own SQLite backend (local self-owned backup when running)
-    if(typeof scheduleCloudSave === 'function') scheduleCloudSave();
-    else saveDataToFirestore().catch(() => {});       // Firestore (primary cloud, multi-device)
     setSyncUI('synced');
   } else {
     setSyncUI('offline');
   }
+  return { ok: true, source: 'sqlite' };
 }
 
 async function loadData() {
   setSyncUI('syncing');
   try {
-    // P1.5: if a cloud save is in flight, wait (≤5s) so we don't read older
-    // cloud data over a just-saved local state.
-    let __pendWaited = 0;
-    while(window.__pendingCloudSave && __pendWaited < 5000) { await new Promise(r => setTimeout(r, 100)); __pendWaited += 100; }
-    // SQLite is the primary local database. Load it first so its savedAt can
-    // protect newer local/offline work from being overwritten by a stale cloud
-    // or backend backup after the app is reopened.
     const loadedSqlite = await loadFromRelationalSQLite();
-    let loadedRemote = await loadDataFromFirestore();
-    if(!loadedRemote) loadedRemote = await loadDataFromBackend();
-
-    if(!loadedSqlite && !loadedRemote) {
-        let migratedFromLegacy = false;
-        if(db) {
-          const tx = db.transaction('data', 'readonly');
-          const os = tx.objectStore('data');
-          let d = await new Promise((r,e)=>{const req=os.get(DATA_KEY);req.onsuccess=()=>r(req.result);req.onerror=e;});
-          let ids = await new Promise((r,e)=>{const req=os.get(IDS_KEY);req.onsuccess=()=>r(req.result);req.onerror=e;});
-          const hadScopedData = !!(d || ids);
-          if(!d) d = await new Promise((r,e)=>{const req=os.get(LEGACY_DATA_KEY);req.onsuccess=()=>r(req.result);req.onerror=e;});
-          if(!ids) ids = await new Promise((r,e)=>{const req=os.get(LEGACY_IDS_KEY);req.onsuccess=()=>r(req.result);req.onerror=e;});
-          if(!d) d = await readLegacyDbValue('MyShopDB', LEGACY_DATA_KEY);
-          if(!ids) ids = await readLegacyDbValue('MyShopDB', LEGACY_IDS_KEY);
-          if(!d) d = await readLegacyDbValue('MyShopDB_discount-update', 'myshop-data:discount-update');
-          if(!ids) ids = await readLegacyDbValue('MyShopDB_discount-update', 'myshop-ids:discount-update');
-          if(!d) d = await readLegacyDbValue('MyShopDB_dailyexpense-update', 'myshop-data:dailyexpense-update');
-          if(!ids) ids = await readLegacyDbValue('MyShopDB_dailyexpense-update', 'myshop-ids:dailyexpense-update');
-          if(d) data = JSON.parse(d.value);
-          if(ids) parseIdsSnapshot(JSON.parse(ids.value));
-          if((d || ids) && !hadScopedData) migratedFromLegacy = true;
-        } else {
-          const d = storageGet('local', DATA_KEY) ?? storageGet('local', LEGACY_DATA_KEY);
-          const ids = storageGet('local', IDS_KEY) ?? storageGet('local', LEGACY_IDS_KEY);
-          if(d) data = JSON.parse(d);
-          if(ids) parseIdsSnapshot(JSON.parse(ids));
-        }
+    if(!loadedSqlite) {
+      // One-time legacy migration only. JSON/localStorage is not a runtime source
+      // of truth; it is read only to seed a fresh SQLite DB after an upgrade.
+      const migratedLegacy = await loadFromJsonBackup();
+      if(migratedLegacy) {
         normalizeDataState();
         invalidateCoreCalcState();
         reconcileDataConsistency();
-        await migrateInMemoryDataToSqlite(true);
-        if(migratedFromLegacy) await saveData();
-    } else if(loadedRemote) {
+        const migratedToSqlite = await migrateInMemoryDataToSqlite(true);
+        if(!migratedToSqlite) throw new Error('Could not migrate legacy data into SQLite');
+      }
+    } else {
       normalizeDataState();
       invalidateCoreCalcState();
       reconcileDataConsistency();
-      await migrateInMemoryDataToSqlite(true);
     }
 
     normalizeDataState();
@@ -4652,14 +4992,7 @@ async function loadData() {
     reconcileDataConsistency();
     setSyncUI('synced');
   } catch(e) {
-    try {
-      const d = storageGet('local', DATA_KEY) ?? storageGet('local', LEGACY_DATA_KEY);
-      const ids = storageGet('local', IDS_KEY) ?? storageGet('local', LEGACY_IDS_KEY);
-      if(d) data = JSON.parse(d);
-      if(ids) parseIdsSnapshot(JSON.parse(ids));
-    } catch(storageError) {
-      console.warn('LocalStorage load failed:', storageError);
-    }
+    console.warn('SQLite source-of-truth load failed:', e);
     normalizeDataState();
     reconcileDataConsistency();
     setSyncUI('offline');
@@ -5213,7 +5546,8 @@ async function runEngineCommand({
     nextReturnGroupId,
     nextPayId,
     nextSupPayId,
-    nextAuditId
+    nextAuditId,
+    localDataUpdatedAt: window.__localDataUpdatedAt || 0
   };
   try {
     const result = await mutate();
@@ -5248,6 +5582,7 @@ async function runEngineCommand({
     nextPayId = backup.nextPayId;
     nextSupPayId = backup.nextSupPayId;
     nextAuditId = backup.nextAuditId;
+    window.__localDataUpdatedAt = backup.localDataUpdatedAt;
     invalidateCoreCalcState();
     if(typeof onRollback === 'function') onRollback(err);
     if(err?.message !== '__ENGINE_VALIDATION__') {
@@ -6027,7 +6362,12 @@ function consumeFifoCostFromLots(lots, qtyNeeded) {
     lot.cost = lot.qty > 0 ? Number((lot.value / lot.qty).toFixed(6)) : (Number(lot.cost) || 0);
     remain = round2(remain - take);
   }
-  const unitCost = usedQty > 0 ? round2(totalCost / usedQty) : 0;
+  // Derived RATE, not money — keep it at 6dp like every other derived unit rate
+  // here (makeFifoLot, lot.cost above). Rounding it to 2dp then multiplying back
+  // up by a container factor magnifies the error: 2900/109 = 26.605504 → 26.61
+  // → ×109 = 2900.49. totalCost stays the exact money; callers that need a
+  // per-unit figure should derive it from totalCost and round ONCE.
+  const unitCost = usedQty > 0 ? Number((totalCost / usedQty).toFixed(6)) : 0;
   return { unitCost, totalCost, usedQty, remainingQty: remain };
 }
 function quoteFifoSaleUnitCost(productId, qtyNeeded, saleDateStr = null, extraReservedQty = 0) {
@@ -6878,7 +7218,106 @@ async function deleteTx(txId) {
 function setEntryCreateVisible(visible) {
   const createView = document.getElementById('entryCreateView');
   if(createView) createView.style.display = visible ? '' : 'none';
+  // The create form and the edit form share this page, so the heading has to
+  // follow — otherwise editing a transaction still reads "Add Entry".
+  const title = document.getElementById('entryPageTitle');
+  if(title) title.textContent = visible ? 'Add Entry' : 'Edit Entry';
 }
+
+// —— EDIT-FORM UNIT CONVERSION ————————————————————————————————————————————————
+// The edit form only ever offers units whose base-unit factor is ALREADY KNOWN, so
+// editing never has to ask "1 COIL = how many?" the way a first purchase does:
+//   base unit (factor 1) + the product's alt/purchased units + same-dimension
+//   standard units + whatever unit this transaction was actually entered in.
+// That last one matters for variable containers — a 98-METER coil keeps its own
+// factor instead of snapping to the product's usual 100.
+function getEditUnitOptions(tx) {
+  const p = getProd(tx?.productId);
+  const base = String(p?.unit || '').trim();
+  const out = [];
+  const add = (name, factor) => {
+    const n = String(name || '').trim();
+    const f = Number(factor);
+    if(!n || !Number.isFinite(f) || f <= 0) return;
+    if(out.some(u => u.name.toUpperCase() === n.toUpperCase())) return;
+    out.push({ name: n, factor: f });
+  };
+  if(base) add(base, 1);
+  // Only units this product is ACTUALLY associated with — its stock unit, the
+  // containers/alt units it was really bought in, and the unit this very line was
+  // entered in. Deliberately NOT every same-dimension standard unit: a PCS product
+  // would then offer DOZ, GROSS… which the shop never uses and only invites a
+  // mis-click on a form that rewrites saved money.
+  const known = (typeof getSellableUnits === 'function' ? getSellableUnits(p) : getProductUnits(p)) || [];
+  known.forEach(u => add(u && u.name, u && u.factor));
+  if(tx && tx.entryUnit && Number(tx.entryFactor) > 0) add(tx.entryUnit, Number(tx.entryFactor));
+  return out.length ? out : [{ name: base || 'PCS', factor: 1 }];
+}
+// The unit currently chosen in the edit form, with its base-unit factor.
+// Falls back to 1:1 so a legacy transaction with no unit metadata behaves exactly
+// as it did before this selector existed.
+function getEditLineUnit() {
+  const tx = editingTxId ? data.transactions.find(t => String(t.id) === String(editingTxId)) : null;
+  const sel = document.getElementById('etxLineUnit');
+  const name = String(sel?.value || '').trim();
+  const opts = getEditUnitOptions(tx);
+  const hit = opts.find(u => u.name.toUpperCase() === name.toUpperCase());
+  const p = getProd(tx?.productId);
+  return {
+    name: hit ? hit.name : (name || String(p?.unit || '').trim()),
+    factor: hit && hit.factor > 0 ? hit.factor : 1,
+    baseUnit: String(p?.unit || '').trim()
+  };
+}
+// Fill the selector and pick the unit this transaction was entered in.
+function refreshEditUnitSelector(tx) {
+  const row = document.getElementById('etxLineUnitRow');
+  const sel = document.getElementById('etxLineUnit');
+  if(!row || !sel) return;
+  // Capital in/out have no product or quantity, so no unit either.
+  if(!tx || !getProd(tx.productId)) { row.style.display = 'none'; sel.innerHTML = ''; return; }
+  const opts = getEditUnitOptions(tx);
+  sel.innerHTML = opts.map(u => `<option value="${escapeHtml(u.name)}">${escapeHtml(u.name)}</option>`).join('');
+  const want = String(tx.entryUnit && Number(tx.entryFactor) > 0 ? tx.entryUnit : (getProd(tx.productId)?.unit || '')).trim();
+  const hit = opts.find(u => u.name.toUpperCase() === want.toUpperCase()) || opts[0];
+  sel.value = hit ? hit.name : '';
+  // Only worth showing when there is an actual choice to make.
+  row.style.display = opts.length > 1 ? '' : 'none';
+}
+// Changing the unit RE-EXPRESSES the same transaction: base quantity and line
+// total are held constant, and qty + price are restated in the newly chosen unit.
+function onEditLineUnitChange() {
+  const tx = editingTxId ? data.transactions.find(t => String(t.id) === String(editingTxId)) : null;
+  if(!tx) return;
+  const qtyEl = document.getElementById('etxQty');
+  const priceEl = document.getElementById('etxPrice');
+  if(!qtyEl || !priceEl) return;
+  const prevQty = round2(parseFloat(qtyEl.value) || 0);
+  const prevPrice = Number(priceEl.value) || 0;
+  const prevFactor = Number(__editLineFactor) > 0 ? Number(__editLineFactor) : 1;
+  const next = getEditLineUnit();
+  const baseQty = round2(prevQty * prevFactor);
+  const nextQty = next.factor > 0 ? round2(baseQty / next.factor) : baseQty;
+  qtyEl.value = nextQty;
+  // Purchase 'total' mode: the field is the whole line cost, so it does not move
+  // with the unit. Otherwise restate the rate against the exact line total.
+  if(!(tx.type === 'purchase' && editPurchasePriceMode === 'total')) {
+    // Carry the EXACT total across the switch. Recomputing it from the displayed
+    // rate would re-round at every hop: 1 COIL @ 3200 → 29.36/pc → ×109 = 3200.24.
+    const lineTotal = Number(__editLineTotal) > 0 ? round2(__editLineTotal) : round2(prevQty * prevPrice);
+    __editLineTotal = lineTotal;
+    priceEl.value = nextQty > 0 ? round2(lineTotal / nextQty) : 0;
+  }
+  __editLineFactor = next.factor;
+}
+// Factor the qty/price fields are currently expressed in (needed to convert when
+// the user switches units).
+let __editLineFactor = 1;
+// The line's exact money, preserved while the user only switches units. Typing in
+// the qty or price field means the user is stating a NEW amount, so the preserved
+// total is dropped and the amount is recomputed from what they typed.
+let __editLineTotal = 0;
+function onEditLineFieldInput() { __editLineTotal = 0; }
 
 function editTx(txId) {
   const idKey = String(txId);
@@ -6893,8 +7332,25 @@ function editTx(txId) {
   cdInit('etxProduct', data.products, tx.productId);
   cdSetValue('etxProduct', tx.productId);
   
-  document.getElementById('etxQty').value = tx.qty;
-  document.getElementById('etxPrice').value = getDisplayUnitPrice(tx);
+  // Unit selector first — qty and price below are expressed in the unit it picks.
+  refreshEditUnitSelector(tx);
+  const editUnit = getEditLineUnit();
+  __editLineFactor = editUnit.factor;
+  const baseQty = round2(Number(tx.qty) || 0);
+  const storedEntryQty = Number(tx.entryQty);
+  // Prefer the stored entry qty when it still agrees with the base qty (a variable
+  // 98-METER coil stays "1 COIL"); otherwise derive it from the factor.
+  const shownQty = (storedEntryQty > 0 && Math.abs(round2(storedEntryQty * editUnit.factor) - baseQty) <= 0.01)
+    ? storedEntryQty
+    : (editUnit.factor > 0 ? round2(baseQty / editUnit.factor) : baseQty);
+  document.getElementById('etxQty').value = shownQty;
+  // Rate per the SELECTED unit, derived from the exact stored total — never
+  // base-rate × factor, which magnifies the rate's rounding (109 × 29.36 = 3200.24).
+  const exactLineTotal = round2(Number(getDisplayLineTotal(tx)) || 0);
+  __editLineTotal = exactLineTotal;
+  document.getElementById('etxPrice').value = shownQty > 0
+    ? round2(exactLineTotal / shownQty)
+    : round2(getDisplayUnitPrice(tx));
   setAppDateValue('etxDate', tx.date || todayStr());
   document.getElementById('etxPriceLbl').textContent =
     tx.type==='sale' ? 'Sell Price per Unit ৳' :
@@ -6934,9 +7390,17 @@ function setEditPurchasePriceMode(mode, tx = null) {
   const priceEl = document.getElementById('etxPrice');
   if(priceEl && activeTx && activeTx.type === 'purchase') {
     if(tx) {
-      priceEl.value = editPurchasePriceMode === 'total'
-        ? round2(Number(activeTx.netAmount) || Number(activeTx.total) || 0)
-        : Number(Number(activeTx.price || activeTx.netUnitCost || 0).toFixed(6));
+      if(editPurchasePriceMode === 'total') {
+        priceEl.value = round2(Number(activeTx.netAmount) || Number(activeTx.total) || 0);
+      } else {
+        // Per the unit currently selected in the edit form, derived from the exact
+        // total — not the stored per-BASE rate, which would read 26.61/pc for a coil.
+        const shownQty = round2(parseFloat(document.getElementById('etxQty')?.value) || 0);
+        const exactTotal = round2(Number(activeTx.netAmount) || Number(activeTx.total) || 0);
+        priceEl.value = shownQty > 0
+          ? round2(exactTotal / shownQty)
+          : Number(Number(activeTx.price || activeTx.netUnitCost || 0).toFixed(6));
+      }
     } else {
       const qty = round2(parseFloat(document.getElementById('etxQty')?.value) || 0);
       const current = Number(priceEl.value);
@@ -6963,7 +7427,8 @@ function refreshSaleBillMetaFromRows(billId) {
     .filter(t => t.type === 'sale' && String(t.billId || '') === key);
   if(!rows.length) return;
   const grossTotal = round2(rows.reduce((s, t) => {
-    const visibleUnit = Number(t.listPrice) > 0 ? Number(t.listPrice) : Number(getDisplayUnitPrice(t));
+    // Full-precision rate — a round2'd rate re-multiplied by qty invents money.
+    const visibleUnit = getGrossUnitPriceExact(t);
     return s + round2((Number(t.qty) || 0) * (Number(visibleUnit) || 0));
   }, 0));
   const discountTotal = round2(rows.reduce((s, t) => s + (Number(t.lineDiscount) || 0), 0));
@@ -7024,13 +7489,34 @@ async function saveEditTx() {
   const productId = cdGetValue('etxProduct');
   const qty = parseFloat(document.getElementById('etxQty').value);
   const price = parseFloat(document.getElementById('etxPrice').value);
-  const cleanQty = round2(qty);
+  // The qty/price fields are in the SELECTED unit; everything below this point —
+  // stock checks, linked-return validation, FIFO cost — works in BASE units.
+  const editLineUnit = getEditLineUnit();
+  const entryFactor = Number(editLineUnit.factor) > 0 ? Number(editLineUnit.factor) : 1;
+  const cleanEntryQty = round2(qty);
+  const cleanQty = round2(cleanEntryQty * entryFactor);
   const editAmount = round2(price);
   const isEditingPurchase = tx.type === 'purchase';
   const purchaseEditUsesTotal = isEditingPurchase && editPurchasePriceMode === 'total';
-  const cleanPrice = isEditingPurchase
-    ? (purchaseEditUsesTotal ? (cleanQty > 0 ? Number((editAmount / cleanQty).toFixed(6)) : 0) : Number((Number(price) || 0).toFixed(6)))
-    : round2(price);
+  // The exact money for this line. In 'total' mode the field IS the line total;
+  // otherwise it is a rate per SELECTED unit, so entryQty × rate is the exact
+  // amount — never baseQty × a rate that was rounded down to the base unit.
+  // If the user only switched units (never retyped an amount), the preserved exact
+  // total wins over qty × the DISPLAYED rate — the displayed rate is rounded to 2dp
+  // for legibility, and re-multiplying it is what produced 3200 → 3200.24.
+  // Guarded: only trust it when it still reconciles with what is on screen.
+  const preservedTotal = Number(__editLineTotal) > 0 && cleanEntryQty > 0
+    && round2(__editLineTotal / cleanEntryQty) === editAmount
+      ? round2(__editLineTotal)
+      : 0;
+  const editLineTotal = purchaseEditUsesTotal
+    ? editAmount
+    : (preservedTotal > 0 ? preservedTotal : round2(cleanEntryQty * (Number(price) || 0)));
+  // Stored per-BASE-unit price is DERIVED from that total and kept at 6dp, so
+  // |total − qty × price| stays inside the reconciliation validator's 0.01.
+  const cleanPrice = cleanQty > 0
+    ? Number((editLineTotal / cleanQty).toFixed(6))
+    : (isEditingPurchase ? 0 : round2(price));
   const txDate = readAppDateValue('etxDate');
   if(!(await requireMonthUnlockOverride(txDate, 'transaction edit'))) return;
   
@@ -7090,14 +7576,14 @@ async function saveEditTx() {
     ? getLinkedReturnExactTotal(linkedEditBaseTx, tx.returnType || 'sale-return', cleanQty, editingTxId)
     : 0;
   const purchaseEditTotal = isEditingPurchase
-    ? (purchaseEditUsesTotal ? editAmount : round2(cleanQty * cleanPrice))
+    ? (purchaseEditUsesTotal ? editAmount : editLineTotal)
     : 0;
   const purchaseEditExtraCost = isEditingPurchase
     ? round2(Math.max(0, parseFloat(document.getElementById('etxLineExtraCost')?.value) || 0))
     : 0;
   const purchaseEditSupplier = isEditingPurchase ? (document.getElementById('etxSupplier')?.value || '').trim() : '';
   const purchaseEditSupplierPhone = isEditingPurchase ? normalizePhone(document.getElementById('etxSupplierPhone')?.value || '') : '';
-  const saleEditGrossTotal = tx.type === 'sale' ? round2(cleanQty * cleanPrice) : 0;
+  const saleEditGrossTotal = tx.type === 'sale' ? editLineTotal : 0;
   const saleEditLineDiscount = tx.type === 'sale'
     ? round2(clamp(Number(tx.lineDiscount) || 0, 0, saleEditGrossTotal))
     : 0;
@@ -7116,6 +7602,15 @@ async function saveEditTx() {
       tx.productId = productId;
       tx.qty = cleanQty;
       tx.price = cleanPrice;
+      // Record the unit this line is now expressed in. Must be set BEFORE the
+      // grossAmount block below (it reads tx.entryQty), and it keeps
+      // healEntryUnitMetadata from "repairing" the line back to base units.
+      if(editLineUnit.name) {
+        tx.entryUnit = editLineUnit.name;
+        tx.entryFactor = entryFactor;
+        tx.entryQty = cleanEntryQty;
+        tx.baseUnit = getProd(productId)?.unit || tx.baseUnit || editLineUnit.name;
+      }
       if(tx.type === 'sale' || tx.type === 'return') {
         const lastPP = getLastPurchasePrice(productId);
         if(tx.type === 'return' && tx.linkedTxId) {
@@ -7142,7 +7637,7 @@ async function saveEditTx() {
             ? editedTotal
             : round2(Math.min(prevCashPaid, editedTotal));
         } else if(tx.type === 'return') {
-          const editedTotal = editedExactReturnTotal > 0 ? editedExactReturnTotal : round2(cleanQty * cleanPrice);
+          const editedTotal = editedExactReturnTotal > 0 ? editedExactReturnTotal : editLineTotal;
           tx.cashPaid = prevWasFullyPaid
             ? editedTotal
             : round2(Math.min(prevCashPaid, editedTotal));
@@ -7150,9 +7645,9 @@ async function saveEditTx() {
       } else {
         tx.cost = cleanPrice;
         if(prevWasFullyPaid) {
-          tx.cashPaid = isEditingPurchase ? purchaseEditTotal : round2(cleanQty * cleanPrice);
+          tx.cashPaid = isEditingPurchase ? purchaseEditTotal : editLineTotal;
         } else {
-          const editedTotal = isEditingPurchase ? purchaseEditTotal : round2(cleanQty * cleanPrice);
+          const editedTotal = isEditingPurchase ? purchaseEditTotal : editLineTotal;
           tx.cashPaid = round2(Math.min(prevCashPaid, editedTotal));
         }
       }
@@ -7162,7 +7657,7 @@ async function saveEditTx() {
         ? saleEditNetTotal
         : (tx.type === 'return' && editedExactReturnTotal > 0)
         ? editedExactReturnTotal
-        : round2(cleanQty * cleanPrice);
+        : editLineTotal;
       if(isEditingPurchase) {
         tx.netUnitCost = cleanPrice;
         tx.netAmount = purchaseEditTotal;
@@ -7213,7 +7708,7 @@ async function saveEditTx() {
       // Update linked supplier credit record if this is a partial purchase
       const linkedSC = data.supplierCredits.find(sc=>String(sc.txId)===String(editingTxId));
       if(linkedSC && !linkedSC.billId) {
-        const newTotal = isEditingPurchase ? purchaseEditTotal : round2(cleanQty * cleanPrice);
+        const newTotal = isEditingPurchase ? purchaseEditTotal : editLineTotal;
         linkedSC.total = newTotal;
         linkedSC.productId = productId;
         linkedSC.qty = cleanQty;
@@ -7239,6 +7734,12 @@ async function saveEditTx() {
 function cancelEditTx() {
   editingTxId = null;
   editPurchasePriceMode = 'unit';
+  __editLineFactor = 1;
+  __editLineTotal = 0;
+  const unitRow = document.getElementById('etxLineUnitRow');
+  if(unitRow) unitRow.style.display = 'none';
+  const unitSel = document.getElementById('etxLineUnit');
+  if(unitSel) unitSel.innerHTML = '';
   document.getElementById('editTxForm').style.display = 'none';
   setEntryCreateVisible(true);
   cdClear('etxProduct');
@@ -7328,6 +7829,18 @@ function pgGet(listId) { return _pages[listId] || 1; }
 function pgSet(listId, page) { _pages[listId] = page; }
 function pgReset(listId) { _pages[listId] = 1; }
 
+// Search boxes must send the list back to page 1 when the QUERY CHANGES — but a
+// render triggered by pgNav re-runs the same render function with the query
+// unchanged, so an unconditional `if(query) pgReset(id)` would undo the page the
+// user just clicked. Reset only on an actual query change.
+const _pageQueries = {}; // { [listId]: last query string this list rendered }
+function pgSyncQuery(listId, query) {
+  const q = String(query == null ? '' : query);
+  if(_pageQueries[listId] === q) return;
+  _pageQueries[listId] = q;
+  pgReset(listId);
+}
+
 function renderPaged(containerId, items, renderFn, listId, emptyHtml) {
   const el = document.getElementById(containerId);
   if(!el) return;
@@ -7369,7 +7882,11 @@ function pgNav(containerId, listId, page) {
     'rSlowSelling':      renderSaleReport,
     'rPurchaseBreakdown':renderPurchaseReport,
     'rPurchaseTxList':   renderPurchaseReport,
+    'rPurchaseCategoryBreakdown': renderPurchaseReport,
+    'rSupplierBreakdown':renderPurchaseReport,
+    'rSupplierDuesList': renderPurchaseReport,
     'rExtraExpensesList':renderSaleReport,
+    'rWithdrawalsList':  renderSaleReport,
     'rCapitalLedgerList':renderSaleReport,
     'stockListRows':     ()=>renderStock(stockFilter, stockCategory),
     'prodList':          renderProducts,
@@ -7602,7 +8119,7 @@ function renderStock(filter='all', category=null) {
   
   document.getElementById('stockList').innerHTML = `<div class="stock-category-strip" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:12px">${topCatButtons}${moreDropdown}<button class="type-btn stock-category-all" style="flex:1;margin:4px;padding:8px;font-size:0.8rem;${!m.category?'background:var(--gold);color:#fff':'background:var(--surface2);color:var(--ink2)'}" onclick='renderStock(${JSON.stringify(m.filter)},null)'>All Categories</button></div><div id="stockListRows"></div>`;
 
-  if(stockQ) pgReset('stockListRows');
+  pgSyncQuery('stockListRows', stockQ);
   renderPaged('stockListRows', m.sortedRows, r=>{
       const p = r.product;
       const s = r.stockQty;
@@ -7758,7 +8275,7 @@ function getReturnDiscountFactor(linkedTx) {
   const first = billLines[0] || linkedTx;
   const grossBill = Number.isFinite(Number(first.billGrossTotal)) && Number(first.billGrossTotal) > 0
     ? round2(Number(first.billGrossTotal))
-    : round2(billLines.reduce((s, t) => s + round2((Number(t.qty) || 0) * (Number(getDisplayUnitPrice(t)) || 0)), 0));
+    : round2(billLines.reduce((s, t) => s + round2((Number(t.qty) || 0) * getGrossUnitPriceExact(t)), 0));
   const netBill = Number.isFinite(Number(first.billNetTotal))
     ? round2(Number(first.billNetTotal))
     : round2(billLines.reduce((s, t) => s + (Number(t.total) || 0), 0));
@@ -8432,9 +8949,14 @@ function onProductChange() {
     catch(e) { console.warn('unit conversion failed, using factor 1:', e); f = 1; }
     const baseQ = round2(entryQ * f) || 1;
     const saleDate = readAppDateValue('eDate');
-    // Show cost per the SELECTED unit (per-base cost × factor), matching the sell
-    // price basis — e.g. COIL shows the per-coil cost, not the per-meter cost.
-    document.getElementById('eCost').value = round2(quoteFifoSaleUnitCost(p.id, baseQ, saleDate, 0) * f);
+    // Show cost per the SELECTED unit, matching the sell price basis — e.g. COIL
+    // shows the per-coil cost, not the per-yard cost. Derived from the EXACT FIFO
+    // total (never rate × factor, which magnifies the rate's rounding error by the
+    // factor: 1 COIL = 109 yards bought for 2900 must read 2900.00, not 2900.49).
+    const q = quoteFifoSaleCost(p.id, baseQ, saleDate, 0);
+    document.getElementById('eCost').value = q.usedQty > 0
+      ? round2((q.totalCost * f) / q.usedQty)
+      : 0;
   }
   // Product defaults: purchase pre-fills the company/list price (then derives net);
   // sale pre-fills the selling price. Both remain editable.
@@ -8473,16 +8995,23 @@ function updatePreview() {
     const saleDate = readAppDateValue('eDate');
     // Quote FIFO cost per base unit; fall back to 1 entry unit's worth when no qty
     // yet so the field still shows a rate. eCost displays cost per the SELECTED unit
-    // (base cost × base-per-unit factor) → METER shows ৳/m, COIL shows ৳/coil.
+    // → METER shows ৳/m, COIL shows ৳/coil. Derived from the EXACT FIFO total, not
+    // from cost × factor, so a container factor can't magnify a rounding error.
     const qtyForCost = baseQty > 0 ? baseQty : factor;
     const costQuote = quoteFifoSaleCost(p.id, qtyForCost, saleDate, 0);
     cost = costQuote.unitCost || 0;
     costTotal = baseQty > 0 ? round2(costQuote.totalCost || 0) : 0;
-    document.getElementById('eCost').value = round2(cost * factor);
+    document.getElementById('eCost').value = costQuote.usedQty > 0
+      ? round2((costQuote.totalCost * factor) / costQuote.usedQty)
+      : 0;
   }
   const box = document.getElementById('preview');
   if (!p||qty<=0){box.style.display='none';updatePurchaseFundingPreview();return;}
-  const costPerEntry = round2(cost * factor);   // cost per chosen unit (display)
+  // Cost per chosen unit (display). Prefer the exact FIFO total ÷ entry qty over
+  // cost × factor, so a container factor can't magnify the rate's rounding.
+  const costPerEntry = (costTotal > 0 && qty > 0)
+    ? round2(costTotal / qty)
+    : round2(cost * factor);
   // Purchase 'total' mode: the field is the product line total; extra costing is
   // added for stock valuation/cash-out, not supplier credit. 'unit' mode / sale:
   // qty × unit price.
@@ -9386,6 +9915,9 @@ function schedulePurchaseReportTxListRender(delay = 120) {
 }
 
 function setReportTab(tab) {
+  // The Credit report tab was removed — the dedicated Credit page covers it. Any
+  // stale 'credit' state (saved tab, old deep link) falls back to Sales.
+  if(tab === 'credit') tab = 'sale';
   reportTab = tab;
   // Clear search inputs when switching tabs so stale search doesn't hide transactions
   const saleSrch = document.getElementById('rSaleTxSearch');
@@ -9394,19 +9926,19 @@ function setReportTab(tab) {
   if(purchSrch) purchSrch.value = '';
   const saleBtn = document.getElementById('rTabSale');
   const purchBtn = document.getElementById('rTabPurchase');
-  const creditBtn = document.getElementById('rTabCredit');
   const ledgerBtn = document.getElementById('rTabLedger');
   const saleSection = document.getElementById('rSaleSection');
   const purchSection = document.getElementById('rPurchaseSection');
   const creditSection = document.getElementById('rCreditSection');
   const ledgerSection = document.getElementById('rLedgerSection');
-  
-  // Reset all buttons
-  [saleBtn, purchBtn, creditBtn, ledgerBtn].forEach(btn => {
+
+  // Reset all buttons (filtered — a removed tab must not throw here)
+  [saleBtn, purchBtn, ledgerBtn].filter(Boolean).forEach(btn => {
     btn.style.background = 'var(--surface2)';
     btn.style.color = 'var(--ink)';
   });
-  [saleSection, purchSection, creditSection, ledgerSection].forEach(sec => sec.style.display = 'none');
+  // creditSection stays in the DOM but is now permanently hidden.
+  [saleSection, purchSection, creditSection, ledgerSection].filter(Boolean).forEach(sec => sec.style.display = 'none');
   
   // Activate selected tab
   if(tab === 'sale') {
@@ -9415,9 +9947,6 @@ function setReportTab(tab) {
   } else if(tab === 'purchase') {
     purchBtn.style.background = 'var(--blue)'; purchBtn.style.color = '#fff';
     purchSection.style.display = '';
-  } else if(tab === 'credit') {
-    creditBtn.style.background = 'var(--gold)'; creditBtn.style.color = '';
-    creditSection.style.display = '';
   } else if(tab === 'ledger') {
     ledgerBtn.style.background = 'var(--ink)'; ledgerBtn.style.color = '#fff';
     ledgerSection.style.display = '';
@@ -10310,7 +10839,7 @@ function setupProductForm() {
 function renderProducts() {
   const pq = (document.getElementById('productSearch')?.value||'').toLowerCase().trim();
   const pm = buildProductsMetrics(pq);
-  if(pq) pgReset('prodList');
+  pgSyncQuery('prodList', pq);
   const sorted = pm.filteredProducts;
   if(pm.allProducts.length===0) {
     document.getElementById('prodList').innerHTML = '<div class="empty"><div class="empty-text">No products yet</div></div>';
@@ -10597,6 +11126,8 @@ async function backendSaveUserData(userId, dataPayload, idsPayload) {
 // phones/other devices) every call fails silently and the app is unaffected.
 // Newer-wins on load prevents a stale backup read from clobbering newer data.
 async function saveDataToBackend() {
+  // Single source of truth: app data writes only to KoshDB SQLite.
+  return false;
   try {
     const uid = normalizeUserId(currentUserId);
     if(!uid) return false;
@@ -10628,6 +11159,8 @@ async function saveDataToBackend() {
 }
 
 async function loadDataFromBackend() {
+  // Single source of truth: app data loads only from KoshDB SQLite.
+  return false;
   try {
     const uid = normalizeUserId(currentUserId);
     if(!uid) return false;

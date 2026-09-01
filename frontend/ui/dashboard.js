@@ -49,6 +49,11 @@ function renderDashboard(keepPaging = false) {
   const extraExpensesToday = metrics.cash.extraExpensesTotal || 0;
   const extraExpensesListToday = metrics.cash.extraExpensesList || [];
   const withdrawalsListToday = metrics.cash.cashWithdrawalsList || [];
+  // Both of these are already subtracted inside cashOut/closingCash. They must be
+  // shown as their own Cash Out rows too, or the itemised rows don't add up to
+  // "Total Out" and the money looks like it vanished.
+  const cashWithdrawalsToday = metrics.cash.cashWithdrawalsTotal || 0;
+  const capitalCashOutToday = metrics.cash.capitalCashOut || 0;
   const loanPaymentCashOut = metrics.cash.loanPaymentCashOut || 0;
   const capitalRowsToday = (calc.snap?.capitalInRaw || []).slice().sort((a,b)=>new Date(b.date)-new Date(a.date));
   const t = i18nText;
@@ -95,6 +100,8 @@ function renderDashboard(keepPaging = false) {
           ${supplierDuePaidCashOut>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Supplier Due Paid</div><div style="font-weight:700;color:var(--blue)">-${fmt(supplierDuePaidCashOut)}</div></div>`:''}
           ${loanPaymentCashOut>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Loan Payment</div><div style="font-weight:700;color:var(--blue)">-${fmt(loanPaymentCashOut)}</div></div>`:''}
           ${extraExpensesToday>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Extra Expenses</div><div style="font-weight:700;color:var(--red)">-${fmt(extraExpensesToday)}</div></div>`:''}
+          ${cashWithdrawalsToday>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Owner Withdrawal</div><div style="font-weight:700;color:var(--red)">-${fmt(cashWithdrawalsToday)}</div></div>`:''}
+          ${capitalCashOutToday>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Capital Withdrawn</div><div style="font-weight:700;color:var(--red)">-${fmt(capitalCashOutToday)}</div></div>`:''}
           <div style="display:flex;justify-content:space-between;align-items:center;border-top:1px dashed var(--border);margin-top:6px;padding-top:8px">
             <div style="font-size:0.8rem;font-weight:700">Total Out (Today)</div>
             <div style="font-weight:700;color:var(--red);font-family:'Instrument Serif',serif">${fmt(cashOutToday)}</div>

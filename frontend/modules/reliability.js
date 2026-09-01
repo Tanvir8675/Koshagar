@@ -216,7 +216,7 @@ window.koshDiagnostics = koshDiagnostics;
 // never be lost. Only the slower CLOUD (Firestore) save is debounced/coalesced
 // here and force-flushed when the app is hidden or closed — so a queued cloud
 // save is never dropped, while rapid mutations collapse into a single PATCH.
-let __cloudSaveTimer = null, __cloudSaveQueued = false;
+let __cloudSaveTimer = null, __cloudSaveQueued = false, __cloudSavePromise = null;
 function scheduleCloudSave(delayMs = 1500) {
   __cloudSaveQueued = true;
   if (__cloudSaveTimer) clearTimeout(__cloudSaveTimer);
@@ -224,15 +224,17 @@ function scheduleCloudSave(delayMs = 1500) {
 }
 function runQueuedCloudSave() {
   if (__cloudSaveTimer) { clearTimeout(__cloudSaveTimer); __cloudSaveTimer = null; }
-  if (!__cloudSaveQueued || typeof saveDataToFirestore !== 'function') return;
+  if (!__cloudSaveQueued || typeof saveDataToFirestore !== 'function') return __cloudSavePromise || Promise.resolve(false);
   __cloudSaveQueued = false;
   const t0 = performance.now();
-  Promise.resolve(saveDataToFirestore()).catch(() => {}).finally(() => {
+  __cloudSavePromise = Promise.resolve(saveDataToFirestore()).catch(() => false).finally(() => {
     // P6.1: record cloud-save duration in the profiler (shown by koshDiagnostics).
     const a = profiler.metrics.get('cloudSave') || []; a.push(performance.now() - t0); if (a.length > 200) a.shift(); profiler.metrics.set('cloudSave', a);
+    __cloudSavePromise = null;
   });
+  return __cloudSavePromise;
 }
-function flushCloudSave() { runQueuedCloudSave(); }
+function flushCloudSave() { return runQueuedCloudSave(); }
 window.scheduleCloudSave = scheduleCloudSave;
 window.flushCloudSave = flushCloudSave;
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushCloudSave(); });

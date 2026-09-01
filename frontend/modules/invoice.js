@@ -17,6 +17,38 @@ function getInvoiceLinesForTx(tx) {
   return [tx];
 }
 
+// How one invoice line should be PRESENTED.
+//
+// A line's money is authoritative as a TOTAL — never as a per-unit rate. Printing
+// `qty × round2(unitPrice)` re-derives the total from a rounded rate and loses
+// money: 1 COIL = 109 pcs sold for 3200 → 29.357798/pc → 29.36 → ×109 = 3200.24,
+// which then shows up as a phantom 0.24 "discount". So: take the stored exact
+// total, present the qty in the unit actually transacted in (1 COIL, not 109 PCS),
+// and derive the rate from total ÷ that qty — which makes the printed
+// Qty × Unit Price = Total reconcile exactly for converted lines.
+function getInvoiceLineView(l) {
+  const p = getProd(l.productId);
+  const lineTotal = round2(Number(getDisplayLineTotal(l)) || 0);
+  const entryFactor = Number(l.entryFactor);
+  const entryQty = Number(l.entryQty);
+  const usesEntryUnit = !!l.entryUnit && entryFactor > 0 && entryQty > 0;
+  const qty = usesEntryUnit ? entryQty : round2(Number(l.qty) || 0);
+  const unit = usesEntryUnit ? String(l.entryUnit) : (p?.unit || '');
+  const baseUnit = p?.unit || '';
+  const baseQty = round2(Number(l.qty) || 0);
+  return {
+    name: p?.name || '?',
+    qty,
+    unit,
+    // "1 COIL (109 PCS)" so the stock unit stays visible on the printed invoice.
+    qtyLabel: (usesEntryUnit && unit !== baseUnit)
+      ? `${qty} ${unit} (${baseQty} ${baseUnit})`.trim()
+      : `${qty} ${unit}`.trim(),
+    unitPrice: qty > 0 ? round2(lineTotal / qty) : 0,
+    lineTotal
+  };
+}
+
 function getTxCustomerPhoneForInvoice(tx) {
   const direct = normalizePhone(tx?.customerPhone || '');
   if(direct) return direct;
@@ -54,7 +86,10 @@ function buildInvoicePayloadFromTx(tx) {
   const supplierName = type === 'purchase' ? getTxSupplierName(first) : '';
   const supplierPhone = type === 'purchase' ? getTxSupplierPhoneForInvoice(first) : '';
   const derivedTotal = round2(lines.reduce((s, l) => s + (Number(l.total) || 0), 0));
-  const derivedSubTotal = round2(lines.reduce((s, l) => s + round2((Number(getDisplayUnitPrice(l)) || 0) * (Number(l.qty) || 0)), 0));
+  // Sum the SAME numbers the table prints, so the rows always add up to Sub Total.
+  // (Was `qty × rounded unit price`, which drifted from the printed totals and
+  // manufactured a fake discount on bills that had none.)
+  const derivedSubTotal = round2(lines.reduce((s, l) => s + getInvoiceLineView(l).lineTotal, 0));
   const hasBillMeta = !!first.billId &&
     Number.isFinite(Number(first.billGrossTotal)) &&
     Number.isFinite(Number(first.billDiscountTotal)) &&
@@ -112,15 +147,13 @@ function renderInvoiceHtml(inv) {
   const partyName = inv.type === 'sale' ? (inv.customerName || 'Walk-in') : (inv.supplierName || 'Unknown Supplier');
   const partyPhone = inv.type === 'sale' ? (inv.customerPhone || '') : (inv.supplierPhone || '');
   const rows = inv.lines.map((l, i) => {
-    const p = getProd(l.productId);
-    const unitPrice = round2(Number(getDisplayUnitPrice(l)) || 0);
-    const lineTotal = round2((Number(l.qty) || 0) * unitPrice);
+    const v = getInvoiceLineView(l);
     return `<tr>
       <td style="height:17px;padding:2px 5px;border:1px solid #111;text-align:center;vertical-align:middle">${i + 1}</td>
-      <td style="height:17px;padding:2px 5px;border:1px solid #111;vertical-align:middle">${escapeHtml(p?.name || '?')}</td>
-      <td style="height:17px;padding:2px 5px;border:1px solid #111;text-align:center;vertical-align:middle">${escapeHtml(`${round2(l.qty)} ${p?.unit || ''}`.trim())}</td>
-      <td style="height:17px;padding:2px 5px;border:1px solid #111;text-align:center;vertical-align:middle">${fmt(unitPrice)}</td>
-      <td style="height:17px;padding:2px 5px;border:1px solid #111;text-align:center;vertical-align:middle">${fmt(lineTotal)}</td>
+      <td style="height:17px;padding:2px 5px;border:1px solid #111;vertical-align:middle">${escapeHtml(v.name)}</td>
+      <td style="height:17px;padding:2px 5px;border:1px solid #111;text-align:center;vertical-align:middle">${escapeHtml(v.qtyLabel)}</td>
+      <td style="height:17px;padding:2px 5px;border:1px solid #111;text-align:center;vertical-align:middle">${fmt(v.unitPrice)}</td>
+      <td style="height:17px;padding:2px 5px;border:1px solid #111;text-align:center;vertical-align:middle">${fmt(v.lineTotal)}</td>
     </tr>`;
   }).join('');
   return `<div id="printInvoiceRoot" style="font-family:Arial, Helvetica, sans-serif;color:#000;background:#fff;width:190mm;min-height:270mm;margin:0 auto;box-sizing:border-box;padding:22mm 18mm 18mm">

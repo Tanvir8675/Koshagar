@@ -14,7 +14,7 @@ window.KoshDB = (function () {
   const CDN_BASE = './vendor/';
   const IDB_STORE = 'data';
   const IDB_KEY = 'SQLITE_DB';
-  const SCHEMA_VERSION = '6';
+  const SCHEMA_VERSION = '7';
 
   let SQL = null;
   let sdb = null;
@@ -54,6 +54,8 @@ window.KoshDB = (function () {
       cost REAL NOT NULL DEFAULT 0 CHECK(cost >= 0),
       total REAL NOT NULL CHECK(total >= 0),
       cashPaid REAL CHECK(cashPaid IS NULL OR cashPaid >= 0),
+      total_paisa INTEGER NOT NULL DEFAULT 0 CHECK(total_paisa >= 0),
+      cash_paid_paisa INTEGER CHECK(cash_paid_paisa IS NULL OR cash_paid_paisa >= 0),
       returnType TEXT,
       linkedTxId TEXT,
       opening INTEGER NOT NULL DEFAULT 0 CHECK(opening IN (0, 1)),
@@ -93,6 +95,8 @@ window.KoshDB = (function () {
       customerPhone TEXT NOT NULL DEFAULT '',
       total REAL NOT NULL CHECK(total > 0),
       paid REAL NOT NULL DEFAULT 0 CHECK(paid >= 0),
+      total_paisa INTEGER NOT NULL DEFAULT 0 CHECK(total_paisa > 0),
+      paid_paisa INTEGER NOT NULL DEFAULT 0 CHECK(paid_paisa >= 0),
       party_phone TEXT,
       json TEXT NOT NULL DEFAULT '{}',
       CHECK(paid <= total + 0.01),
@@ -106,6 +110,7 @@ window.KoshDB = (function () {
       date TEXT NOT NULL,
       local_date TEXT NOT NULL DEFAULT '',
       amount REAL NOT NULL CHECK(amount > 0),
+      amount_paisa INTEGER NOT NULL DEFAULT 0 CHECK(amount_paisa > 0),
       json TEXT NOT NULL DEFAULT '{}',
       FOREIGN KEY (creditId) REFERENCES credits(id) ON DELETE RESTRICT ON UPDATE CASCADE
     );
@@ -118,6 +123,8 @@ window.KoshDB = (function () {
       supplierPhone TEXT NOT NULL DEFAULT '',
       total REAL NOT NULL CHECK(total > 0),
       paid REAL NOT NULL DEFAULT 0 CHECK(paid >= 0),
+      total_paisa INTEGER NOT NULL DEFAULT 0 CHECK(total_paisa > 0),
+      paid_paisa INTEGER NOT NULL DEFAULT 0 CHECK(paid_paisa >= 0),
       party_phone TEXT,
       json TEXT NOT NULL DEFAULT '{}',
       CHECK(paid <= total + 0.01),
@@ -131,6 +138,7 @@ window.KoshDB = (function () {
       date TEXT NOT NULL,
       local_date TEXT NOT NULL DEFAULT '',
       amount REAL NOT NULL CHECK(amount > 0),
+      amount_paisa INTEGER NOT NULL DEFAULT 0 CHECK(amount_paisa > 0),
       json TEXT NOT NULL DEFAULT '{}',
       FOREIGN KEY (scId) REFERENCES supplier_credits(id) ON DELETE RESTRICT ON UPDATE CASCADE
     );
@@ -141,6 +149,7 @@ window.KoshDB = (function () {
       date TEXT NOT NULL,
       local_date TEXT NOT NULL DEFAULT '',
       amount REAL NOT NULL CHECK(amount > 0),
+      amount_paisa INTEGER NOT NULL DEFAULT 0 CHECK(amount_paisa > 0),
       note TEXT NOT NULL DEFAULT '',
       json TEXT NOT NULL DEFAULT '{}',
       FOREIGN KEY (loanTxId) REFERENCES transactions(id) ON DELETE RESTRICT ON UPDATE CASCADE
@@ -151,6 +160,7 @@ window.KoshDB = (function () {
       date TEXT NOT NULL,
       local_date TEXT NOT NULL DEFAULT '',
       amount REAL NOT NULL CHECK(amount > 0),
+      amount_paisa INTEGER NOT NULL DEFAULT 0 CHECK(amount_paisa > 0),
       reason TEXT NOT NULL DEFAULT '',
       json TEXT NOT NULL DEFAULT '{}'
     );
@@ -160,13 +170,15 @@ window.KoshDB = (function () {
       date TEXT NOT NULL,
       local_date TEXT NOT NULL DEFAULT '',
       amount REAL NOT NULL CHECK(amount > 0),
+      amount_paisa INTEGER NOT NULL DEFAULT 0 CHECK(amount_paisa > 0),
       note TEXT NOT NULL DEFAULT '',
       json TEXT NOT NULL DEFAULT '{}'
     );
 
     CREATE TABLE IF NOT EXISTS opening_cash (
       date TEXT PRIMARY KEY NOT NULL,
-      amount REAL NOT NULL CHECK(amount >= 0)
+      amount REAL NOT NULL CHECK(amount >= 0),
+      amount_paisa INTEGER NOT NULL DEFAULT 0 CHECK(amount_paisa >= 0)
     );
 
     CREATE TABLE IF NOT EXISTS units (
@@ -766,6 +778,17 @@ window.KoshDB = (function () {
     return JSON.stringify(o);
   }
 
+  function withPaisaFields(obj, fields) {
+    const out = { ...(obj || {}) };
+    fields.forEach(field => {
+      if (out[field] === undefined || out[field] === null || out[field] === '') return;
+      const p = toPaisa(out[field]);
+      out[`${field}Paisa`] = p;
+      out[field] = fromPaisa(p);
+    });
+    return out;
+  }
+
   // --- BD phone identity ------------------------------------------------------
   // Canonicalize any input to a BD mobile number: 11 digits, 01[3-9]XXXXXXXX.
   // Handles +880 / 880 / 00880 prefixes, a missing leading 0, Bengali digits,
@@ -839,7 +862,12 @@ window.KoshDB = (function () {
 
   function toPaisa(v) {
     const n = Number(v);
-    return Number.isFinite(n) ? Math.round(n * 100) : 0;
+    return Number.isFinite(n) ? Math.round(n * 100 + 1e-6) : 0;
+  }
+
+  function fromPaisa(v) {
+    const p = Number(v);
+    return Number.isFinite(p) ? Math.round(p) / 100 : 0;
   }
 
   function toMilli(v) {
@@ -1098,12 +1126,37 @@ window.KoshDB = (function () {
     } catch (_) { return 0; }
   }
 
+  const MONEY_COLUMNS = {
+    transactions: { total_paisa: 'total', cash_paid_paisa: 'cashPaid' },
+    credits: { total_paisa: 'total', paid_paisa: 'paid' },
+    payments: { amount_paisa: 'amount' },
+    supplier_credits: { total_paisa: 'total', paid_paisa: 'paid' },
+    supplier_payments: { amount_paisa: 'amount' },
+    loan_payments: { amount_paisa: 'amount' },
+    cash_withdrawals: { amount_paisa: 'amount' },
+    extra_expenses: { amount_paisa: 'amount' }
+  };
+
   function rowsJson(table) {
     const out = [];
-    const res = sdb.exec('SELECT json FROM ' + table);
+    const res = sdb.exec('SELECT * FROM ' + table);
+    const moneyMap = MONEY_COLUMNS[table] || null;
     if (res[0]) {
       for (const r of res[0].values) {
-        try { out.push(JSON.parse(r[0])); } catch (_) {}
+        try {
+          const row = {};
+          res[0].columns.forEach((col, idx) => { row[col] = r[idx]; });
+          const obj = JSON.parse(row.json);
+          if (moneyMap) {
+            Object.entries(moneyMap).forEach(([paisaCol, field]) => {
+              if (row[paisaCol] !== null && row[paisaCol] !== undefined && row[paisaCol] !== '') {
+                obj[`${field}Paisa`] = Number(row[paisaCol]) || 0;
+                obj[field] = fromPaisa(row[paisaCol]);
+              }
+            });
+          }
+          out.push(obj);
+        } catch (_) {}
       }
     }
     return out;
@@ -1217,19 +1270,23 @@ window.KoshDB = (function () {
         table: 'transactions',
         rows: sortTransactionsForInsert(d.transactions),
         idOf: t => str(t.id),
-        jsonOf: t => J(t),
+        jsonOf: t => J(withPaisaFields(t, ['total', 'cashPaid'])),
         upsertSql: `INSERT INTO transactions
-            (id, type, date, local_date, productId, qty, price, cost, total, cashPaid, returnType, linkedTxId, opening, adjustmentType, entry_unit, entry_qty, entry_factor, base_unit, json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, type, date, local_date, productId, qty, price, cost, total, cashPaid, total_paisa, cash_paid_paisa, returnType, linkedTxId, opening, adjustmentType, entry_unit, entry_qty, entry_factor, base_unit, json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             type=excluded.type, date=excluded.date, local_date=excluded.local_date, productId=excluded.productId, qty=excluded.qty,
             price=excluded.price, cost=excluded.cost, total=excluded.total, cashPaid=excluded.cashPaid,
+            total_paisa=excluded.total_paisa, cash_paid_paisa=excluded.cash_paid_paisa,
             returnType=excluded.returnType, linkedTxId=excluded.linkedTxId, opening=excluded.opening,
             adjustmentType=excluded.adjustmentType, entry_unit=excluded.entry_unit, entry_qty=excluded.entry_qty,
             entry_factor=excluded.entry_factor, base_unit=excluded.base_unit, json=excluded.json`,
         paramsOf: (t, j) => [
           str(t.id), str(t.type), str(t.date), localDateOf(t), str(t.productId),
-          num(t.qty), num(t.price), num(t.cost), num(t.total), num(t.cashPaid),
+          num(t.qty), num(t.price), num(t.cost), fromPaisa(toPaisa(t.total)),
+          t.cashPaid === undefined || t.cashPaid === null || t.cashPaid === '' ? null : fromPaisa(toPaisa(t.cashPaid)),
+          toPaisa(t.total),
+          t.cashPaid === undefined || t.cashPaid === null || t.cashPaid === '' ? null : toPaisa(t.cashPaid),
           str(t.returnType),
           (t.linkedTxId !== undefined && t.linkedTxId !== null && String(t.linkedTxId) !== '') ? str(t.linkedTxId) : null,
           t.opening ? 1 : 0, str(t.adjustmentType), ...txUnitCols(t), j
@@ -1239,68 +1296,70 @@ window.KoshDB = (function () {
         table: 'credits',
         rows: d.credits || [],
         idOf: c => str(c.id),
-        jsonOf: c => J(c),
-        upsertSql: `INSERT INTO credits (id, date, local_date, customerName, customerPhone, total, paid, party_phone, json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        jsonOf: c => J(withPaisaFields(c, ['total', 'paid'])),
+        upsertSql: `INSERT INTO credits (id, date, local_date, customerName, customerPhone, total, paid, total_paisa, paid_paisa, party_phone, json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET date=excluded.date, local_date=excluded.local_date, customerName=excluded.customerName,
             customerPhone=excluded.customerPhone, total=excluded.total, paid=excluded.paid,
+            total_paisa=excluded.total_paisa, paid_paisa=excluded.paid_paisa,
             party_phone=excluded.party_phone, json=excluded.json`,
-        paramsOf: (c, j) => [str(c.id), str(c.date), localDateOf(c), str(c.customerName) || 'Unknown Customer', str(c.customerPhone) || '', num(c.total), num(c.paid) || 0, partyPhoneOf(c.customerPhone), j]
+        paramsOf: (c, j) => [str(c.id), str(c.date), localDateOf(c), str(c.customerName) || 'Unknown Customer', str(c.customerPhone) || '', fromPaisa(toPaisa(c.total)), fromPaisa(toPaisa(c.paid)), toPaisa(c.total), toPaisa(c.paid), partyPhoneOf(c.customerPhone), j]
       },
       {
         table: 'payments',
         rows: d.payments || [],
         idOf: p => str(p.id),
-        jsonOf: p => J(p),
-        upsertSql: `INSERT INTO payments (id, creditId, date, local_date, amount, json) VALUES (?, ?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET creditId=excluded.creditId, date=excluded.date, local_date=excluded.local_date, amount=excluded.amount, json=excluded.json`,
-        paramsOf: (p, j) => [str(p.id), str(p.creditId), str(p.date), localDateOf(p), num(p.amount), j]
+        jsonOf: p => J(withPaisaFields(p, ['amount'])),
+        upsertSql: `INSERT INTO payments (id, creditId, date, local_date, amount, amount_paisa, json) VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET creditId=excluded.creditId, date=excluded.date, local_date=excluded.local_date, amount=excluded.amount, amount_paisa=excluded.amount_paisa, json=excluded.json`,
+        paramsOf: (p, j) => [str(p.id), str(p.creditId), str(p.date), localDateOf(p), fromPaisa(toPaisa(p.amount)), toPaisa(p.amount), j]
       },
       {
         table: 'supplier_credits',
         rows: d.supplierCredits || [],
         idOf: sc => str(sc.id),
-        jsonOf: sc => J(sc),
-        upsertSql: `INSERT INTO supplier_credits (id, date, local_date, supplierName, supplierPhone, total, paid, party_phone, json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        jsonOf: sc => J(withPaisaFields(sc, ['total', 'paid'])),
+        upsertSql: `INSERT INTO supplier_credits (id, date, local_date, supplierName, supplierPhone, total, paid, total_paisa, paid_paisa, party_phone, json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET date=excluded.date, local_date=excluded.local_date, supplierName=excluded.supplierName,
             supplierPhone=excluded.supplierPhone, total=excluded.total, paid=excluded.paid,
+            total_paisa=excluded.total_paisa, paid_paisa=excluded.paid_paisa,
             party_phone=excluded.party_phone, json=excluded.json`,
-        paramsOf: (sc, j) => [str(sc.id), str(sc.date), localDateOf(sc), str(sc.supplierName) || '', str(sc.supplierPhone) || '', num(sc.total), num(sc.paid) || 0, partyPhoneOf(sc.supplierPhone), j]
+        paramsOf: (sc, j) => [str(sc.id), str(sc.date), localDateOf(sc), str(sc.supplierName) || '', str(sc.supplierPhone) || '', fromPaisa(toPaisa(sc.total)), fromPaisa(toPaisa(sc.paid)), toPaisa(sc.total), toPaisa(sc.paid), partyPhoneOf(sc.supplierPhone), j]
       },
       {
         table: 'supplier_payments',
         rows: d.supplierPayments || [],
         idOf: sp => str(sp.id),
-        jsonOf: sp => J(sp),
-        upsertSql: `INSERT INTO supplier_payments (id, scId, date, local_date, amount, json) VALUES (?, ?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET scId=excluded.scId, date=excluded.date, local_date=excluded.local_date, amount=excluded.amount, json=excluded.json`,
-        paramsOf: (sp, j) => [str(sp.id), str(sp.scId), str(sp.date), localDateOf(sp), num(sp.amount), j]
+        jsonOf: sp => J(withPaisaFields(sp, ['amount'])),
+        upsertSql: `INSERT INTO supplier_payments (id, scId, date, local_date, amount, amount_paisa, json) VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET scId=excluded.scId, date=excluded.date, local_date=excluded.local_date, amount=excluded.amount, amount_paisa=excluded.amount_paisa, json=excluded.json`,
+        paramsOf: (sp, j) => [str(sp.id), str(sp.scId), str(sp.date), localDateOf(sp), fromPaisa(toPaisa(sp.amount)), toPaisa(sp.amount), j]
       },
       {
         table: 'loan_payments',
         rows: d.loanPayments || [],
         idOf: lp => str(lp.id),
-        jsonOf: lp => J(lp),
-        upsertSql: `INSERT INTO loan_payments (id, loanTxId, date, local_date, amount, note, json) VALUES (?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET loanTxId=excluded.loanTxId, date=excluded.date, local_date=excluded.local_date, amount=excluded.amount, note=excluded.note, json=excluded.json`,
-        paramsOf: (lp, j) => [str(lp.id), str(lp.loanTxId), str(lp.date), localDateOf(lp), num(lp.amount), str(lp.note) || '', j]
+        jsonOf: lp => J(withPaisaFields(lp, ['amount'])),
+        upsertSql: `INSERT INTO loan_payments (id, loanTxId, date, local_date, amount, amount_paisa, note, json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET loanTxId=excluded.loanTxId, date=excluded.date, local_date=excluded.local_date, amount=excluded.amount, amount_paisa=excluded.amount_paisa, note=excluded.note, json=excluded.json`,
+        paramsOf: (lp, j) => [str(lp.id), str(lp.loanTxId), str(lp.date), localDateOf(lp), fromPaisa(toPaisa(lp.amount)), toPaisa(lp.amount), str(lp.note) || '', j]
       },
       {
         table: 'cash_withdrawals',
         rows: d.cashWithdrawals || [],
         idOf: w => str(w.id),
-        jsonOf: w => J(w),
-        upsertSql: `INSERT INTO cash_withdrawals (id, date, local_date, amount, reason, json) VALUES (?, ?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET date=excluded.date, local_date=excluded.local_date, amount=excluded.amount, reason=excluded.reason, json=excluded.json`,
-        paramsOf: (w, j) => [str(w.id), str(w.date), localDateOf(w), num(w.amount), str(w.reason) || '', j]
+        jsonOf: w => J(withPaisaFields(w, ['amount'])),
+        upsertSql: `INSERT INTO cash_withdrawals (id, date, local_date, amount, amount_paisa, reason, json) VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET date=excluded.date, local_date=excluded.local_date, amount=excluded.amount, amount_paisa=excluded.amount_paisa, reason=excluded.reason, json=excluded.json`,
+        paramsOf: (w, j) => [str(w.id), str(w.date), localDateOf(w), fromPaisa(toPaisa(w.amount)), toPaisa(w.amount), str(w.reason) || '', j]
       },
       {
         table: 'extra_expenses',
         rows: d.extraExpenses || [],
         idOf: e => str(e.id),
-        jsonOf: e => J(e),
-        upsertSql: `INSERT INTO extra_expenses (id, date, local_date, amount, note, json) VALUES (?, ?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET date=excluded.date, local_date=excluded.local_date, amount=excluded.amount, note=excluded.note, json=excluded.json`,
-        paramsOf: (e, j) => [str(e.id), str(e.date), localDateOf(e), num(e.amount), str(e.note) || '', j]
+        jsonOf: e => J(withPaisaFields(e, ['amount'])),
+        upsertSql: `INSERT INTO extra_expenses (id, date, local_date, amount, amount_paisa, note, json) VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET date=excluded.date, local_date=excluded.local_date, amount=excluded.amount, amount_paisa=excluded.amount_paisa, note=excluded.note, json=excluded.json`,
+        paramsOf: (e, j) => [str(e.id), str(e.date), localDateOf(e), fromPaisa(toPaisa(e.amount)), toPaisa(e.amount), str(e.note) || '', j]
       },
       {
         table: 'audit_trail',
@@ -1436,15 +1495,15 @@ window.KoshDB = (function () {
         const oc = d.openingCashByDate || {};
         const desiredOc = new Map();
         Object.keys(oc).forEach(k => {
-          if (/^\d{4}-\d{2}-\d{2}$/.test(String(k))) desiredOc.set(String(k), num(oc[k]) || 0);
+          if (/^\d{4}-\d{2}-\d{2}$/.test(String(k))) desiredOc.set(String(k), toPaisa(oc[k]));
         });
         const existingOc = new Map();
         try {
-          const ocr = sdb.exec('SELECT date, amount FROM opening_cash');
+          const ocr = sdb.exec('SELECT date, amount_paisa FROM opening_cash');
           if (ocr[0]) for (const r of ocr[0].values) existingOc.set(String(r[0]), Number(r[1]));
         } catch (_) {}
-        const ocup = sdb.prepare('INSERT INTO opening_cash (date, amount) VALUES (?, ?) ON CONFLICT(date) DO UPDATE SET amount=excluded.amount');
-        for (const [k, v] of desiredOc) if (existingOc.get(k) !== v) ocup.run([k, v]);
+        const ocup = sdb.prepare('INSERT INTO opening_cash (date, amount, amount_paisa) VALUES (?, ?, ?) ON CONFLICT(date) DO UPDATE SET amount=excluded.amount, amount_paisa=excluded.amount_paisa');
+        for (const [k, v] of desiredOc) if (existingOc.get(k) !== v) ocup.run([k, fromPaisa(v), v]);
         ocup.free();
         const ocdel = sdb.prepare('DELETE FROM opening_cash WHERE date = ?');
         for (const k of existingOc.keys()) if (!desiredOc.has(k)) ocdel.run([k]);
@@ -1488,9 +1547,14 @@ window.KoshDB = (function () {
   function loadLegacyMirrorIntoObject() {
     const oc = {};
     try {
-      const ocRes = sdb.exec('SELECT date, amount FROM opening_cash');
-      if (ocRes[0]) for (const r of ocRes[0].values) oc[r[0]] = Number(r[1]);
-    } catch (_) {}
+      const ocRes = sdb.exec('SELECT date, amount_paisa FROM opening_cash');
+      if (ocRes[0]) for (const r of ocRes[0].values) oc[r[0]] = fromPaisa(r[1]);
+    } catch (_) {
+      try {
+        const ocRes = sdb.exec('SELECT date, amount FROM opening_cash');
+        if (ocRes[0]) for (const r of ocRes[0].values) oc[r[0]] = Number(r[1]);
+      } catch (_) {}
+    }
     const units = [];
     try {
       const uRes = sdb.exec('SELECT name FROM units');

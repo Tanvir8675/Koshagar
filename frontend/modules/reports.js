@@ -11,14 +11,14 @@
 function renderReport() {
   // Reset all report pagination when period/tab changes
   ['rTxList','rBreakdown','rProfitability','rProfitabilityList','rFastSelling','rSlowSelling','rPurchaseBreakdown','rPurchaseTxList'].forEach(id=>pgReset(id));
-  if(reportTab === 'sale') {
-    renderSaleReport();
-  } else if(reportTab === 'purchase') {
+  if(reportTab === 'purchase') {
     renderPurchaseReport();
-  } else if(reportTab === 'credit') {
-    renderCreditReport();
   } else if(reportTab === 'ledger') {
     renderLedgerReport();
+  } else {
+    // Sales is the default — the Credit tab was removed (the Credit page covers it),
+    // so any leftover 'credit' state lands here instead of rendering nothing.
+    renderSaleReport();
   }
 }
 
@@ -109,7 +109,12 @@ function renderSaleReport() {
   const periodNetBusinessWorth = metrics.business.netBusinessWorth;
   const periodExtraExpenses = metrics.cash.extraExpensesTotal || 0;
   const periodExtraExpensesList = metrics.cash.extraExpensesList || [];
-  if(saleTxQ) pgReset('rTxList');
+  // Already inside totalCostBreakdown/closingCash — itemise them or the Cost rows
+  // don't add up to "Total Cost" and the money looks like it silently disappeared.
+  const periodCashWithdrawals = metrics.cash.cashWithdrawalsTotal || 0;
+  const periodCashWithdrawalsList = metrics.cash.cashWithdrawalsList || [];
+  const periodCapitalCashOut = metrics.cash.capitalCashOut || 0;
+  pgSyncQuery('rTxList', saleTxQ);
 
   const saleBreakdownTitle = rType2 === 'daily'
     ? "💵 Today's Cash Summary"
@@ -151,6 +156,8 @@ function renderSaleReport() {
           ${periodSupplierDuePaid>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Supplier Due Paid</div><div style="font-weight:700;color:var(--blue)">-${fmt(periodSupplierDuePaid)}</div></div>`:''}
           ${periodLoanPaymentCashOut>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Loan Payment</div><div style="font-weight:700;color:var(--blue)">-${fmt(periodLoanPaymentCashOut)}</div></div>`:''}
           ${periodExtraExpenses>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Extra Expenses</div><div style="font-weight:700;color:var(--red)">-${fmt(periodExtraExpenses)}</div></div>`:''}
+          ${periodCashWithdrawals>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Owner Withdrawal</div><div style="font-weight:700;color:var(--red)">-${fmt(periodCashWithdrawals)}</div></div>`:''}
+          ${periodCapitalCashOut>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Capital Withdrawn</div><div style="font-weight:700;color:var(--red)">-${fmt(periodCapitalCashOut)}</div></div>`:''}
           <div style="display:flex;justify-content:space-between;align-items:center;border-top:1px dashed var(--border);margin-top:6px;padding-top:8px">
             <div style="font-size:0.8rem;font-weight:700">Total Cost</div>
             <div style="font-weight:700;color:var(--red);font-family:'Instrument Serif',serif">${fmt(metrics.cash.totalCostBreakdown)}</div>
@@ -185,6 +192,14 @@ function renderSaleReport() {
         </div>
       </div>
       <div style="border-top:1.5px dashed var(--border);margin-top:12px;padding-top:10px">
+        <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--ink2);margin-bottom:6px">💸 Cash Withdrawals (Owner Drawings)</div>
+        <div id="rWithdrawalsList"></div>
+        <div style="display:flex;justify-content:space-between;align-items:center;padding-top:7px;margin-top:2px">
+          <div style="font-size:0.8rem;font-weight:700;color:var(--ink2)">Total Withdrawals</div>
+          <div style="font-weight:700;color:var(--red);font-family:'Instrument Serif',serif">${fmt(periodCashWithdrawals)}</div>
+        </div>
+      </div>
+      <div style="border-top:1.5px dashed var(--border);margin-top:12px;padding-top:10px">
         <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--ink2);margin-bottom:6px">🏦 Capital Ledger (Investment In)</div>
         <div id="rCapitalLedgerList"></div>
         <div style="display:flex;justify-content:space-between;align-items:center;padding-top:7px;margin-top:2px">
@@ -210,6 +225,24 @@ function renderSaleReport() {
       </div>`,
     'rExtraExpensesList',
     '<div style="font-size:0.78rem;color:var(--ink2);padding:4px 0">No extra expenses in this period.</div>'
+  );
+  renderPaged(
+    'rWithdrawalsList',
+    periodCashWithdrawalsList,
+    w => `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid var(--border)">
+        <div>
+          <div style="font-size:0.82rem;font-weight:600">${escapeHtml(w.reason)}</div>
+          <div style="font-size:0.68rem;color:var(--ink2)">${displayDateOnly(w.date) || w.date}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="font-family:'Instrument Serif',serif;font-size:0.92rem;color:var(--red)">-${fmt(w.amount)}</span>
+          <button onclick="startEditWithdrawal('${w.id}')" style="background:none;border:none;color:var(--blue);font-size:0.9rem;cursor:pointer;padding:2px 5px;border-radius:5px;opacity:0.75" title="Edit">✏️</button>
+          <button onclick="deleteCashWithdrawal('${w.id}')" class="del-btn" style="font-size:0.78rem;padding:2px 6px">🗑</button>
+        </div>
+      </div>`,
+    'rWithdrawalsList',
+    '<div style="font-size:0.78rem;color:var(--ink2);padding:4px 0">No withdrawals in this period.</div>'
   );
   renderPaged(
     'rCapitalLedgerList',
@@ -302,7 +335,7 @@ function renderPurchaseReport() {
   const periodPurchaseCashNow = metrics.purchase.cashOutNow;
   const periodPurchaseCreditNow = metrics.purchase.outstandingSupplierDueNow;
   const totalSpend = metrics.purchase.netSpendNow;
-  if(purchTxQ) pgReset('rPurchaseTxList');
+  pgSyncQuery('rPurchaseTxList', purchTxQ);
 
   document.getElementById('rPurchaseStats').innerHTML = `
     <div class="stat"><div class="stat-label">Net Spend</div><div class="stat-value blue">${fmt(totalSpend)}</div>${purchAgg.returnCount>0?`<div class="stat-sub">${purchAgg.returnCount} purchase return(s) deducted</div>`:''}<div class="stat-sub">${fmt(periodPurchaseCashNow)} + ${fmt(periodPurchaseCreditNow)} = ${fmt(totalSpend)}</div></div>
@@ -343,20 +376,20 @@ function renderPurchaseReport() {
     'rPurchaseBreakdown',
     '<div class="empty" style="padding:14px"><div class="empty-text">No data</div></div>');
 
-  document.getElementById('rPurchaseCategoryBreakdown').innerHTML = purchAgg.byCategoryEntries.length === 0
-    ? '<div class="empty" style="padding:14px"><div class="empty-text">No data</div></div>'
-    : purchAgg.byCategoryEntries.map(([cat,d]) =>
+  renderPaged('rPurchaseCategoryBreakdown', purchAgg.byCategoryEntries,
+    ([cat,d]) =>
       `<div class="report-row">
         <div><div class="report-name">${cat}</div><div class="report-qty">${d.qty} units</div></div>
-        <div><div class="report-rev" style="color:var(--blue)">${fmt(d.spend)}</div></div></div>`
-    ).join('');
-  document.getElementById('rSupplierBreakdown').innerHTML = purchAgg.bySupplierEntries.length === 0
-    ? '<div class="empty" style="padding:14px"><div class="empty-text">No supplier data</div></div>'
-    : purchAgg.bySupplierEntries.map(([sup,d]) =>
+        <div><div class="report-rev" style="color:var(--blue)">${fmt(d.spend)}</div></div></div>`,
+    'rPurchaseCategoryBreakdown',
+    '<div class="empty" style="padding:14px"><div class="empty-text">No data</div></div>');
+  renderPaged('rSupplierBreakdown', purchAgg.bySupplierEntries,
+    ([sup,d]) =>
       `<div class="report-row">
         <div><div class="report-name">${sup}</div><div class="report-qty">${d.count} transactions</div></div>
-        <div><div class="report-rev" style="color:var(--blue)">${fmt(d.spend)}</div></div></div>`
-    ).join('');
+        <div><div class="report-rev" style="color:var(--blue)">${fmt(d.spend)}</div></div></div>`,
+    'rSupplierBreakdown',
+    '<div class="empty" style="padding:14px"><div class="empty-text">No supplier data</div></div>');
   const purchaseReportTxFeed = [
     ...(purchAgg.groupedPurchTxns || []).map(g => ({ kind: 'bill', date: g.date, payload: g })),
     ...(purchAgg.groupedPurchaseReturnTxns || []).map(g => ({ kind: 'return', date: g.date, payload: g }))
@@ -368,13 +401,17 @@ function renderPurchaseReport() {
   const centralCreditAll = buildCreditMetrics('daily', todayStr());
   const allOpenSC = (centralCreditAll.allSupplierCredits || []).filter(sc=>getSupplierDue(sc)>0);
   const totalSupplierDue = round2(Number(centralCreditAll.totalSupplierDue) || 0);
-  document.getElementById('rSupplierDues').innerHTML = allOpenSC.length === 0
+  // The "total due" header must sit OUTSIDE the paged list — renderPaged owns its
+  // container's innerHTML, so the header goes in a wrapper and the rows page inside.
+  const openSupplierDues = allOpenSC.slice().sort((a,b)=>new Date(b.date)-new Date(a.date));
+  document.getElementById('rSupplierDues').innerHTML = openSupplierDues.length === 0
     ? '<div class="empty" style="padding:14px"><div class="empty-text">✅ No outstanding supplier dues</div></div>'
     : `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0 12px;border-bottom:1px solid var(--border);margin-bottom:4px">
         <div style="font-size:0.82rem;color:var(--ink2)">Total due to suppliers</div>
         <div style="font-family:'Instrument Serif',serif;font-size:1.2rem;color:var(--red);font-weight:700">${fmt(totalSupplierDue)}</div>
-       </div>` +
-      allOpenSC.sort((a,b)=>new Date(b.date)-new Date(a.date)).map(sc=>{
+       </div><div id="rSupplierDuesList"></div>`;
+  if(openSupplierDues.length > 0) {
+    renderPaged('rSupplierDuesList', openSupplierDues, sc=>{
         const due = getSupplierDue(sc);
         const paid = getSupplierTotalPaid(sc);
         const pct = sc.total>0 ? Math.min(100,(paid/sc.total*100)).toFixed(0) : 0;
@@ -406,7 +443,10 @@ function renderPurchaseReport() {
           ${payHist}
           <button onclick="openSupplierPayModal(${sc.id})" style="margin-top:8px;padding:6px 14px;background:var(--blue);color:#fff;border:none;border-radius:8px;font-size:0.82rem;font-weight:700;cursor:pointer;font-family:'Outfit',sans-serif">💰 Pay Supplier</button>
         </div>`;
-      }).join('');
+      },
+      'rSupplierDuesList',
+      '<div class="empty" style="padding:14px"><div class="empty-text">✅ No outstanding supplier dues</div></div>');
+  }
 }
 
 function renderLedgerReport() {

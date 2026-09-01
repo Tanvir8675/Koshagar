@@ -87,7 +87,7 @@ function txRow(t, opts = {}) {
   return `<div class="tx-item">
     <div class="tx-icon ${typeClass}">${typeIcon}</div>
     <div class="tx-body"><div class="tx-name">${p?.name||'?'}</div>
-      <div class="tx-sub">${t.qty} ${p?.unit||''} · ${fmt(getDisplayUnitPrice(t))}/unit · ${txDate}${billText}${t.reason?' · '+t.reason:''}</div>
+      <div class="tx-sub">${txQtyRateLabel(t, p)} · ${txDate}${billText}${t.reason?' · '+t.reason:''}</div>
       ${linkedInfo}${editTrace}</div>
     <div class="tx-right" style="display:flex;align-items:center;gap:8px">
       <div><div class="tx-amount ${typeClass}">${fmt(getDisplayLineTotal(t))}</div>
@@ -151,6 +151,32 @@ function getDisplayUnitPrice(tx) {
   if(Number.isFinite(lp) && lp > 0) return round2(lp);
   return round2(Number(tx.price) || 0);
 }
+// The pre-discount rate at FULL stored precision. getDisplayUnitPrice round2's for
+// display, and multiplying that rounded rate back up by qty loses money whenever
+// the rate is a derived one (1 COIL = 109 pcs at 3200 → 29.357798 → 29.36 → ×109 =
+// 3200.24). Anything computing a TOTAL must use this, never the display rate.
+function getGrossUnitPriceExact(tx) {
+  if(!tx) return 0;
+  const lp = Number(tx.listPrice);
+  if(Number.isFinite(lp) && lp > 0) return lp;
+  return Number(tx.price) || 0;
+}
+// "1 COIL (109 PCS) · ৳3,200/COIL" — show the unit actually transacted in, with a
+// rate derived from the exact line total so qty × rate reconciles with the amount
+// shown on the right. Falls back to the plain base-unit form for legacy rows.
+function txQtyRateLabel(t, p) {
+  const baseUnit = p?.unit || '';
+  const baseQty = round2(Number(t.qty) || 0);
+  const ef = Number(t.entryFactor);
+  const eq = Number(t.entryQty);
+  const uses = !!t.entryUnit && ef > 0 && eq > 0
+    && String(t.entryUnit).toUpperCase() !== String(baseUnit).toUpperCase()
+    && Math.abs(round2(eq * ef) - baseQty) <= 0.01;
+  if(!uses) return `${baseQty} ${baseUnit} · ${fmt(getDisplayUnitPrice(t))}/unit`;
+  const lineTotal = round2(getDisplayLineTotal(t));
+  const rate = eq > 0 ? round2(lineTotal / eq) : 0;
+  return `${eq} ${t.entryUnit} (${baseQty} ${baseUnit}) · ${fmt(rate)}/${t.entryUnit}`;
+}
 function getDisplayLineTotal(tx) {
   if(!tx) return 0;
   if(tx.type === 'purchase') {
@@ -158,7 +184,8 @@ function getDisplayLineTotal(tx) {
   }
   const hasBillDiscount = !!tx.billId && Math.abs(Number(tx.lineDiscount) || 0) > 0;
   if(hasBillDiscount && tx.type !== 'return') {
-    return round2((Number(tx.qty) || 0) * (Number(getDisplayUnitPrice(tx)) || 0));
+    // Gross (pre-discount) total — derived at full precision, then rounded once.
+    return round2((Number(tx.qty) || 0) * getGrossUnitPriceExact(tx));
   }
   return round2(Number(tx.total) || 0);
 }

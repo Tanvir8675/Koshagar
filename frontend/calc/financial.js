@@ -126,7 +126,12 @@ KoshCalc._computeFinancialSnapshotUncached = function(periodType, periodDate) {
   const saleReturnCost = round2(saleReturnsRaw.reduce((s, t) => s + returnCostTotal(t), 0));
   const netCost = round2(grossSalesCost - saleReturnCost);
   // Stock adjustment losses (damage/theft/correction): user-stated value × qty.
-  const adjustmentLossTotal = round2(adjustmentsRaw.reduce((s, t) => s + round2((Number(t.cost) || 0) * (Number(t.qty) || 0)), 0));
+  // Prefer the stored exact total; cost × qty is only a legacy fallback (it rebuilds
+  // the amount from a rounded per-unit rate and can drift by a paisa per row).
+  const adjustmentLossTotal = round2(adjustmentsRaw.reduce((s, t) => {
+    const stored = Number(t.total);
+    return s + (Number.isFinite(stored) && stored > 0 ? round2(stored) : round2((Number(t.cost) || 0) * (Number(t.qty) || 0)));
+  }, 0));
   // Single source of truth for profit: net revenue - net cost - adjustment losses.
   const profit = round2(netRevenue - netCost - adjustmentLossTotal);
 
