@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KoshAgar — connection test</title>
+<!--
+  A diagnostic page, not part of the app.
+
+  It exercises the whole stack in the order the real app will: sign up or sign
+  in, list the shops that belong to you, then read stock, dues, cash and the
+  monthly summary straight from the views. If the numbers here match your books,
+  the data layer is sound and the remaining work is only wiring the existing
+  screens to it.
+
+  Open at http://localhost:3100/data/connection-test.html
+-->
+<style>
+  :root {
+    --ink:#101a17; --paper:#f5f7f3; --card:#fff; --rule:#d6ded6;
+    --muted:#66766e; --green:#1d6b4c; --red:#a33224; --gold:#8a6410;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--paper); color:var(--ink);
+         font:15px/1.55 "Segoe UI", system-ui, sans-serif; }
+  header { background:var(--ink); color:#fff; padding:14px 20px; }
+  header b { color:#e0b64a; }
+  main { max-width:900px; margin:0 auto; padding:20px; }
+  section { background:var(--card); border:1px solid var(--rule); border-radius:6px;
+            padding:16px 18px; margin-bottom:16px; }
+  h2 { margin:0 0 12px; font-size:15px; text-transform:uppercase;
+       letter-spacing:.06em; color:var(--muted); }
+  label { display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
+  input { width:100%; padding:9px 11px; border:1px solid var(--rule);
+          border-radius:4px; font-size:15px; }
+  button { background:var(--green); color:#fff; border:0; border-radius:4px;
+           padding:10px 16px; font-size:14px; font-weight:600; cursor:pointer;
+           margin:10px 6px 0 0; }
+  button.alt { background:var(--ink); }
+  button.warn { background:var(--red); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .tabs { display:flex; gap:8px; margin-bottom:6px; }
+  .tabs button { background:var(--rule); color:var(--ink); margin:0; }
+  .tabs button.on { background:var(--green); color:#fff; }
+  .msg { margin-top:12px; padding:10px 12px; border-radius:4px; font-size:14px;
+         white-space:pre-wrap; display:none; }
+  .msg.show { display:block; }
+  .msg.ok { background:#e2ede5; color:var(--green); }
+  .msg.bad { background:#f6e4e0; color:var(--red); }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th { text-align:left; font-size:12px; text-transform:uppercase; color:var(--muted);
+       border-bottom:1px solid var(--ink); padding:0 8px 6px 0; }
+  td { padding:6px 8px 6px 0; border-bottom:1px solid var(--rule); }
+  .num { text-align:right; font-variant-numeric:tabular-nums; }
+  .hint { font-size:13px; color:var(--muted); margin:6px 0 0; }
+  .hide { display:none; }
+</style>
+</head>
+<body>
+<header><b>KoshAgar</b> — connection test</header>
+<main>
+
+<section id="authCard">
+  <h2>Account</h2>
+  <div class="tabs">
+    <button id="tabIn"  class="on" onclick="showTab('in')">Sign in</button>
+    <button id="tabUp"           onclick="showTab('up')">Sign up</button>
+  </div>
+
+  <div id="paneIn">
+    <label>User id or email</label>
+    <input id="inId" autocomplete="username" placeholder="tasmim007 or you@example.com">
+    <label>Password</label>
+    <input id="inPw" type="password" autocomplete="current-password">
+    <button onclick="doSignIn()">Sign in</button>
+    <button class="alt" onclick="doReset()">Forgot password</button>
+  </div>
+
+  <div id="paneUp" class="hide">
+    <label>Email</label>
+    <input id="upEmail" type="email" autocomplete="email">
+    <label>User id <span id="upIdState" class="hint"></span></label>
+    <input id="upId" autocomplete="username" oninput="checkId()" placeholder="3–30 characters">
+    <label>Password</label>
+    <input id="upPw" type="password" autocomplete="new-password" placeholder="at least 6 characters">
+    <button onclick="doSignUp()">Create account</button>
+  </div>
+
+  <div id="paneOtp" class="hide">
+    <p class="hint">A code was emailed to <b id="otpEmail"></b>. Enter it to finish.</p>
+    <label>Code</label>
+    <input id="otpCode" inputmode="numeric" placeholder="6 digits">
+    <button onclick="doVerify()">Verify</button>
+    <button class="alt" onclick="doResend()">Send again</button>
+  </div>
+
+  <div id="authMsg" class="msg"></div>
+</section>
+
+<section id="whoCard" class="hide">
+  <h2>Signed in</h2>
+  <div id="whoBody"></div>
+  <button class="warn" onclick="doSignOut()">Sign out</button>
+  <button onclick="loadEverything()">Reload data</button>
+</section>
+
+<section id="dataCard" class="hide">
+  <h2>Your data, read from the server</h2>
+  <div id="dataBody">Loading…</div>
+</section>
+
+</main>
+
+<script src="../config.js"></script>
+<script src="./supabase-api.js"></script>
+<script src="./auth.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const money = (n) => Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+let pendingEmail = null;
+
+function say(el, text, ok) {
+  const m = $(el);
+  m.textContent = text;
+  m.className = 'msg show ' + (ok ? 'ok' : 'bad');
+}
+function showTab(which) {
+  $('paneIn').classList.toggle('hide', which !== 'in');
+  $('paneUp').classList.toggle('hide', which !== 'up');
+  $('tabIn').classList.toggle('on', which === 'in');
+  $('tabUp').classList.toggle('on', which === 'up');
+}
+
+async function checkId() {
+  const v = $('upId').value.trim();
+  if (!v) { $('upIdState').textContent = ''; return; }
+  const bad = KoshAuth.validateUsername(v);
+  if (bad) { $('upIdState').textContent = '— too short or has invalid characters'; return; }
+  $('upIdState').textContent = '— checking…';
+  $('upIdState').textContent = (await KoshAuth.isUsernameFree(v)) ? '— available ✓' : '— already taken ✗';
+}
+
+async function doSignUp() {
+  try {
+    const email = $('upEmail').value.trim();
+    await KoshAuth.signUp({ email, username: $('upId').value.trim(), password: $('upPw').value });
+    pendingEmail = email;
+    $('otpEmail').textContent = email;
+    $('paneUp').classList.add('hide');
+    $('paneOtp').classList.remove('hide');
+    say('authMsg', 'Account created. Check your email for the code.', true);
+  } catch (e) { say('authMsg', e.message, false); }
+}
+
+async function doVerify() {
+  try {
+    await KoshAuth.verifyOtp({ email: pendingEmail, token: $('otpCode').value });
+    say('authMsg', 'Verified. Signing you in…', true);
+    await afterSignIn();
+  } catch (e) { say('authMsg', e.message, false); }
+}
+
+async function doResend() {
+  try { await KoshAuth.resendOtp({ email: pendingEmail }); say('authMsg', 'A new code is on its way.', true); }
+  catch (e) { say('authMsg', e.message, false); }
+}
+
+async function doSignIn() {
+  try {
+    await KoshAuth.signIn({ identifier: $('inId').value, password: $('inPw').value });
+    await afterSignIn();
+  } catch (e) { say('authMsg', e.message, false); }
+}
+
+async function doReset() {
+  const r = await KoshAuth.requestPasswordReset($('inId').value);
+  say('authMsg', r.message, true);
+}
+
+async function doSignOut() {
+  await KoshAuth.signOut();
+  $('whoCard').classList.add('hide');
+  $('dataCard').classList.add('hide');
+  $('authCard').classList.remove('hide');
+  say('authMsg', 'Signed out.', true);
+}
+
+async function afterSignIn() {
+  const user = await KoshAuth.currentUser();
+  if (!user) { say('authMsg', 'Signed in, but the session did not stick. Try again.', false); return; }
+  $('authCard').classList.add('hide');
+  $('whoCard').classList.remove('hide');
+  $('whoBody').innerHTML =
+    `<table><tr><th>Email</th><td>${user.email}</td></tr>` +
+    `<tr><th>User id</th><td id="whoUser">…</td></tr>` +
+    `<tr><th>Verified</th><td>${user.email_confirmed_at ? 'yes' : 'not yet'}</td></tr></table>`;
+  try {
+    const p = await KoshApi.select('profiles', 'select=username&limit=1');
+    $('whoUser').textContent = p?.[0]?.username || '(none)';
+  } catch (_) { $('whoUser').textContent = '(could not read)'; }
+  await loadEverything();
+}
+
+// -------------------------------------------------------------------------
+// The read path the real app will use.
+// -------------------------------------------------------------------------
+async function loadEverything() {
+  $('dataCard').classList.remove('hide');
+  const out = $('dataBody');
+  out.textContent = 'Loading…';
+  try {
+    const shops = await KoshApi.select('v_my_shops', 'select=*');
+    if (!shops.length) { out.innerHTML = '<p>No shop is linked to this account yet.</p>'; return; }
+
+    const shop = shops.find((s) => !s.is_archived) || shops[0];
+    const [stock, due, cash, months, worth] = await Promise.all([
+      KoshApi.selectAll('v_product_stock', `shop_id=eq.${shop.shop_id}&select=product_name,qty,stock_value&qty=gt.0&order=stock_value.desc`),
+      KoshApi.select('v_due_totals',    `shop_id=eq.${shop.shop_id}&select=*`),
+      KoshApi.select('v_cash_balance',  `shop_id=eq.${shop.shop_id}&select=*`),
+      KoshApi.select('v_monthly_trading', `shop_id=eq.${shop.shop_id}&select=*&order=month`),
+      KoshApi.select('v_business_worth', `shop_id=eq.${shop.shop_id}&select=*`)
+    ]);
+
+    const w = worth[0] || {};
+    const d = due[0] || {};
+    out.innerHTML = `
+      <table>
+        <tr><th>Shop</th><td>${shop.name}</td></tr>
+        <tr><th>Sales</th><td>${shop.sale_count} &nbsp; purchases ${shop.purchase_count}</td></tr>
+        <tr><th>Products in stock</th><td>${stock.length}</td></tr>
+        <tr><th>Stock value</th><td class="num">${money(w.stock_value)}</td></tr>
+        <tr><th>Customer due</th><td class="num">${money(d.total_receivable)}</td></tr>
+        <tr><th>Supplier due</th><td class="num">${money(d.total_payable)}</td></tr>
+        <tr><th>Cash</th><td class="num">${money((cash || []).reduce((s, c) => s + Number(c.balance || 0), 0))}</td></tr>
+        <tr><th>Business worth</th><td class="num"><b>${money(w.business_worth)}</b></td></tr>
+      </table>
+      <h2 style="margin-top:18px">Month by month</h2>
+      <table>
+        <tr><th>Month</th><th class="num">Revenue</th><th class="num">COGS</th><th class="num">Gross profit</th></tr>
+        ${months.map((m) => `<tr><td>${String(m.month).slice(0, 7)}</td>
+          <td class="num">${money(m.net_revenue)}</td>
+          <td class="num">${money(m.cogs)}</td>
+          <td class="num">${money(m.gross_profit)}</td></tr>`).join('')}
+      </table>
+      <h2 style="margin-top:18px">Top stock</h2>
+      <table>
+        <tr><th>Product</th><th class="num">Qty</th><th class="num">Value</th></tr>
+        ${stock.slice(0, 10).map((s) => `<tr><td>${s.product_name}</td>
+          <td class="num">${s.qty}</td><td class="num">${money(s.stock_value)}</td></tr>`).join('')}
+      </table>
+      <p class="hint">Every figure above is computed by the database, not by this page.</p>`;
+  } catch (e) {
+    out.innerHTML = `<div class="msg show bad">${e.message}</div>`;
+  }
+}
+
+// Resume an existing session on load.
+(async () => {
+  const s = KoshAuth.restore();
+  if (s) { await KoshAuth.refreshIfNeeded(s); await afterSignIn(); }
+})();
+</script>
+</body>
+</html>
