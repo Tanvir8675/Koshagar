@@ -442,18 +442,31 @@ for (const [key, lines] of ordered) {
         ? Math.round(lines.reduce((s, l) =>
             s + Number(l.lineExtraCost ?? l.invoiceExtraCost ?? 0), 0) * 100) / 100
         : 0;
-      // financial.js line 152 subtracts extra cost as cash out unconditionally:
-      // carrying and unloading are paid at the gate, not put on the supplier's
-      // account. So it is added to the cash rather than left sitting as a debt.
-      const payable = Math.round((net + extraCost) * 100) / 100;
-
-      let cash = Math.round((paid + extraCost) * 100) / 100;
-      if (cash > payable + 0.001) {
-        overpaid.push({ key, date, type, recorded: cash, bill: payable });
-        cash = payable;
+      // THE FREIGHT IS SENT ONCE, NOT ADDED TO THE CASH FIRST.
+      //
+      // Carrying and unloading are paid at the gate rather than put on the
+      // supplier's account, and post_purchase already knows that: it writes
+      // cash_paid + extra_cost to the ledger and owes the supplier for the
+      // goods alone (28_extra_cost_is_cash.sql). Adding the freight into
+      // cash_paid here as well made the database add it a second time - and
+      // the cap it checks is against the GOODS, so a bill whose cash already
+      // covered the goods was refused outright:
+      //
+      //   CASH_EXCEEDS_TOTAL: paid 22850.00 against goods of 22660.00
+      //
+      // Both bills carrying freight in this file failed that way, so nothing
+      // was imported with the doubled figure - the guard caught it rather than
+      // letting it through quietly, which is the whole reason it exists.
+      //
+      // cash_paid is now the money against the GOODS. extra_cost travels on its
+      // own in the payload and the database adds it to the cash exactly once.
+      let cash = Math.round(paid * 100) / 100;
+      if (cash > net + 0.001) {
+        overpaid.push({ key, date, type, recorded: cash, bill: net });
+        cash = net;
       }
-      cash = Math.min(cash, payable);
-      const stillOwed = Math.round((payable - cash) * 100) / 100;
+      cash = Math.min(cash, net);
+      const stillOwed = Math.round((net - cash) * 100) / 100;
 
       let partyFinal = party;
       if (stillOwed > 0.01 && !partyFinal) {
