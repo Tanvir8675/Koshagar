@@ -279,14 +279,40 @@ window.KoshWrite = (function () {
   // -----------------------------------------------------------------------
   // Trading documents
   // -----------------------------------------------------------------------
-  // `lines` come in as { productId, unit, qtyEntered, unitPrice, lineDiscount }.
-  const buildLines = (lines) => Promise.all((lines || []).map(async (l) => ({
-    product_id: l.productId,
-    unit_id: await unitId(l.unit),
-    qty_entered: Number(l.qtyEntered),
-    unit_price: Number(l.unitPrice),
-    line_discount: r2(l.lineDiscount || 0)
-  })));
+  // `lines` come in as { productId, unit, qtyEntered, unitPrice, lineDiscount }
+  // and, for a purchase bought at a discount, { listUnitPrice, qtyBase }.
+  //
+  // THE COMPANY PRICE AND THE DISCOUNT ARE BOTH KEPT, NOT JUST THE RESULT.
+  //
+  // A purchase at 15% off a company price of 100 used to be sent as a flat 85,
+  // and 85 was the only number the books ever held. The shop still SELLS at 100
+  // - the discount is the shopkeeper's margin, not the customer's - so a sale
+  // screen quoting 85 invites a second 15% off the same goods and turns a
+  // margin into a loss.
+  //
+  // purchase_lines already had somewhere to put both: line_total is a generated
+  // column, round(qty_base * unit_price, 2) - line_discount. So the LIST price
+  // goes in unit_price, the discount goes in line_discount, and line_total
+  // comes out at exactly the net it was before. Valuation, FIFO cost, stock
+  // value and what the supplier is owed all read line_total, so not one of them
+  // moves - the shop simply now remembers what the company charges.
+  //
+  // Sales are untouched: a sale passes lineDiscount for its bill discount and
+  // no listUnitPrice, so it takes the branch it always did.
+  const buildLines = (lines) => Promise.all((lines || []).map(async (l) => {
+    const net = Number(l.unitPrice);
+    const list = Number(l.listUnitPrice);
+    const qtyBase = Number(l.qtyBase);
+    const priced = (Number.isFinite(list) && list > net && qtyBase > 0)
+      ? { unit_price: list, line_discount: r2((list - net) * qtyBase) }
+      : { unit_price: net,  line_discount: r2(l.lineDiscount || 0) };
+    return {
+      product_id: l.productId,
+      unit_id: await unitId(l.unit),
+      qty_entered: Number(l.qtyEntered),
+      ...priced
+    };
+  }));
 
   async function postSale({ date, party, lines, billDiscount = 0, cashPaid = 0, note, key }) {
     return call('post_sale', {

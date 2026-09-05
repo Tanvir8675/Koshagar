@@ -218,6 +218,16 @@ window.KoshLoad = (function () {
         productId: l.product_id, qty: num(l.qty_base),
         price: netUnitPrice(l.line_total, l.qty_base),
         entryUnitPrice: num(l.unit_price), lineDiscount: num(l.line_discount),
+        // What the company charges, and what was knocked off it. unit_price is
+        // the LIST price per base unit for anything bought at a discount (see
+        // buildLines in write-shop.js); `price` above stays the net, so every
+        // valuation is unchanged. On rows written before that - and on anything
+        // bought at full price - the two are equal and the discount reads 0,
+        // which is the truth about them.
+        listUnitPrice: num(l.unit_price),
+        discountPercent: (num(l.unit_price) > 0 && num(l.qty_base) > 0)
+          ? r2((num(l.line_discount) / (num(l.unit_price) * num(l.qty_base))) * 100)
+          : 0,
         cost: num(l.landed_unit_cost), landedUnitCost: num(l.landed_unit_cost),
         total: num(l.line_total), cashPaid: cash[i] || 0,
         billId: p.bill_no, legacyBillId: p.legacy_no || '',

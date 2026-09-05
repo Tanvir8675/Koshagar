@@ -1921,7 +1921,7 @@ input:checked + .toggle-slider:before { transform: translateX(18px); }
         </div>
         <div id="lineUnitRow" style="flex:0 0 42%;display:none">
           <label id="eLineUnitLbl">Unit</label>
-          <select id="eLineUnit" onchange="onLineUnitChange()"></select>
+          <select id="eLineUnit" onchange="onLineUnitChange();if(typeof updateSellPriceHint==='function')updateSellPriceHint()"></select>
         </div>
       </div>
     </div>
@@ -1961,7 +1961,11 @@ input:checked + .toggle-slider:before { transform: translateX(18px); }
       </div>
       <div id="purchaseDiscountSummary" style="font-size:0.8rem;font-weight:700;color:var(--green);margin:-2px 0 8px"></div>
     </div>
-    <div class="form-group"><label id="ePriceLbl">Sell Price per Unit ৳</label><input type="number" id="ePrice" placeholder="0.00" step="0.01" oninput="updatePreview()"></div>
+    <div class="form-group"><label id="ePriceLbl">Sell Price per Unit ৳</label><input type="number" id="ePrice" placeholder="0.00" step="0.01" oninput="updatePreview();updateSellPriceHint()"></div>
+    <!-- Shopkeeper's note. Never printed, never on an invoice, never shown to a
+         customer: the invoice is built from the saved document, not from this
+         form, so nothing here can reach it. -->
+    <div id="sellPriceHint" style="display:none;font-size:0.76rem;line-height:1.5;color:var(--ink2);background:var(--surface2);border-left:3px solid var(--gold);border-radius:6px;padding:7px 10px;margin:-6px 0 12px"></div>
     <div class="form-group" id="landedCostRow" style="display:none"><label>Extra Costing ৳ (transport, others — cash out)</label><input type="number" id="eLandedCost" placeholder="0.00" step="0.01" min="0" oninput="updatePreview()"></div>
     <div class="form-group"><label>Date</label><input type="date" id="eDate" class="app-date-input" onchange="updatePurchaseFundingPreview()"></div>
     <div class="form-group" id="costRow" style="display:none"><label>Cost Price per Unit ৳ (auto)</label><input type="number" id="eCost" placeholder="0.00" step="0.01" readonly style="background:var(--surface2);cursor:not-allowed"></div>
@@ -10951,6 +10955,76 @@ function resetPurchaseDiscountInputs() {
   const s = document.getElementById('purchaseDiscountSummary'); if(s) s.textContent = '';
 }
 
+// WHAT THE COMPANY CHARGES, AND HOW MUCH ROOM THERE IS BELOW IT.
+//
+// A shop that buys at 15% off a company price of 100 still SELLS at 100. The
+// discount is the shopkeeper's margin. Quoting 85 on the sale screen invites a
+// second 15% off the same goods - 25 or 30% in total - and turns the margin
+// into a loss without anything on screen looking wrong.
+//
+// So the sale form opens at the COMPANY price, and says in small print how far
+// down it can go before the profit is gone. Read from the newest purchase of
+// that product, because that is what the shop actually paid last.
+function lastPurchasePricing(productId) {
+  const buys = (data.transactions || [])
+    .filter(t => t.type === 'purchase' && String(t.productId) === String(productId)
+                 && !t.reversed && (Number(t.qty) || 0) > 0)
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
+  const t = buys[0];
+  if(!t) return null;
+  // Both per BASE unit: `price` is the net the books value stock at, and
+  // listUnitPrice is what the company asked before the discount. On a purchase
+  // entered without a company price the two are equal, and the honest answer is
+  // "no discount recorded" rather than a guess.
+  const net  = round2(Number(t.price) || 0);
+  const list = round2(Number(t.listUnitPrice) || 0) || net;
+  if(!(list > 0)) return null;
+  const pct = list > net ? round2((list - net) / list * 100) : 0;
+  return { list, net, discountPct: pct, date: t.localDate || t.date };
+}
+
+function updateSellPriceHint() {
+  const el = document.getElementById('sellPriceHint');
+  if(!el) return;
+  const hide = () => { el.style.display = 'none'; el.innerHTML = ''; };
+  if(entryType !== 'sale') return hide();
+  const p = getProd(document.getElementById('eProduct')?.value);
+  if(!p) return hide();
+  const pr = lastPurchasePricing(p.id);
+  if(!pr) return hide();
+
+  // Quoted per the unit the sale is being entered in, so the two figures on the
+  // screen are in the same basis - a per-COIL price beside a per-yard cost is
+  // how a rate gets read as the wrong number.
+  let f = 1;
+  try { if(typeof getEntryUnitConversion === 'function') f = Number(getEntryUnitConversion(p.id).factor) || 1; }
+  catch(_) { f = 1; }
+  const unit = (typeof getEntryUnitConversion === 'function')
+    ? (getEntryUnitConversion(p.id).unit || p.unit || '') : (p.unit || '');
+  const listPer = round2(pr.list * f);
+
+  const typed = parseFloat(document.getElementById('ePrice')?.value);
+  const given = (Number.isFinite(typed) && listPer > 0 && typed < listPer)
+    ? round2((listPer - typed) / listPer * 100) : 0;
+
+  // Over the room the purchase discount bought, every further taka is the
+  // shop's own money. Said plainly, and only when it is actually happening.
+  const over = pr.discountPct > 0 && given > pr.discountPct + 0.01;
+  const room = pr.discountPct > 0
+    ? `Room to discount: <b>up to ${fmt(pr.discountPct)}%</b> (৳${fmt(round2(listPer * (1 - pr.discountPct / 100)))} floor)`
+    : 'No supplier discount recorded on the last purchase — every taka off is your own margin.';
+  const now = given > 0.01
+    ? `<br>You are giving <b>${fmt(given)}%</b>.`
+    : '';
+  el.innerHTML =
+    `🏷️ Company price <b>৳${fmt(listPer)}</b>/${escapeHtml(String(unit))}`
+    + (pr.discountPct > 0 ? ` · bought at <b>${fmt(pr.discountPct)}% off</b>` : '')
+    + `<br>${room}${now}`
+    + (over ? '<br><span style="color:var(--red);font-weight:700">⚠️ Past your own discount — this sale is below cost.</span>' : '');
+  el.style.borderLeftColor = over ? 'var(--red)' : 'var(--gold)';
+  el.style.display = 'block';
+}
+
 function onProductChange() {
   const p = getProd(document.getElementById('eProduct').value);
   if (p) document.getElementById('ePrice').value = '';
@@ -10985,6 +11059,19 @@ function onProductChange() {
     const priceEl = document.getElementById('ePrice');
     if(priceEl && !priceEl.value) priceEl.value = round2(p.defaultSellingPrice);
   }
+  // No selling price set for this product: open at the COMPANY price from the
+  // last purchase, not at what the shop paid for it. See lastPurchasePricing().
+  if (p && entryType==='sale') {
+    const priceEl = document.getElementById('ePrice');
+    const pr = lastPurchasePricing(p.id);
+    if(priceEl && !priceEl.value && pr && pr.list > 0) {
+      let f = 1;
+      try { if(typeof getEntryUnitConversion === 'function') f = Number(getEntryUnitConversion(p.id).factor) || 1; }
+      catch(_) { f = 1; }
+      priceEl.value = round2(pr.list * f);
+    }
+  }
+  updateSellPriceHint();
   updatePreview();
 }
 
@@ -11537,7 +11624,14 @@ async function submitEntry() {
         unit: __conv.unit || (getProd(productId) || {}).unit,
         qtyEntered: __isConv ? __entryQty : cleanQty,
         unitPrice: storedUnitPrice,
-        lineDiscount: appliedLineDiscount
+        lineDiscount: appliedLineDiscount,
+        // Same rule as the cart path, and it has to be said twice because these
+        // are two separate ways to save an entry - every rule added to one has
+        // been absent from the other until someone noticed.
+        ...(entryType === 'purchase' && Number(__costing.listUnitPrice) > 0
+            ? { listUnitPrice: round2(Number(__costing.listUnitPrice) / __factor),
+                qtyBase: cleanQty }
+            : {})
       };
 
       if (entryType === 'sale') {
@@ -11785,7 +11879,15 @@ async function submitBillEntry(entryDate) {
         // lineTotal / baseQty); this is the same figure, and it.price already
         // is it.
         unitPrice: Number(it.price),
-        lineDiscount: Number(it.lineDiscount || 0)
+        lineDiscount: Number(it.lineDiscount || 0),
+        // Bought at a discount: send the company price and the base quantity
+        // too, so the database can keep both and still derive the same net.
+        // listUnitPrice on a cart line is per ENTERED unit; qty_base is what
+        // line_total is generated from, so it is converted here.
+        ...(entryType === 'purchase' && Number(it.listUnitPrice) > 0
+            ? { listUnitPrice: round2(Number(it.listUnitPrice) / (Number(it.entryFactor) || 1)),
+                qtyBase: Number(it.qty) }
+            : {})
       }));
 
       if (entryType === 'sale') {
