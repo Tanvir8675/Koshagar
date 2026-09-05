@@ -6649,7 +6649,7 @@ function getOpeningCashForDate(dateYmd) {
     while(cursor < targetDate) {
       const day = dateToYMDLocal(cursor);
       const snap = computeFinancialSnapshot('daily', day);
-      carried = round2(carried + round2(snap.netCashDelta || 0));
+      carried += Number(snap.netCashDelta) || 0;   // rounded once, at the end
       cursor.setDate(cursor.getDate() + 1);
     }
     return round2(carried);
@@ -6662,12 +6662,28 @@ function getOpeningCashForDate(dateYmd) {
   if(Number.isNaN(baseDate.getTime()) || Number.isNaN(targetDate.getTime()) || targetDate <= baseDate) {
     return base.cash;
   }
+  // ROUNDED ONCE AT THE END, NOT ONCE A DAY.
+  //
+  // This walks a day at a time from the last recorded opening to the date
+  // asked for, and it used to round the running total at every step. Over five
+  // months that is a hundred and fifty-odd roundings of a figure that is only
+  // read at the end - and each one can move the answer by half a paisa in
+  // whichever direction the day's total happened to fall.
+  //
+  // The database does not do this. opening_cash_on() sums the ledger between
+  // the two dates in a single expression and rounds the result once, which is
+  // why the two answers drifted 0.71 apart on five months of real trading with
+  // every underlying figure agreeing exactly.
+  //
+  // Each day's delta is already exact to the paisa, so adding them at full
+  // precision and rounding at the end cannot lose anything - it can only stop
+  // losing something.
   let carried = base.cash;
   const cursor = new Date(baseDate);
   while(cursor < targetDate) {
     const day = dateToYMDLocal(cursor);
     const snap = computeFinancialSnapshot('daily', day);
-    carried = round2(carried + round2(snap.netCashDelta || 0));
+    carried += Number(snap.netCashDelta) || 0;
     cursor.setDate(cursor.getDate() + 1);
   }
   return round2(carried);
