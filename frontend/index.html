@@ -8381,13 +8381,32 @@ function __reconcileDataConsistencyImpl() {
     return round2(Math.max(0, lineSum - discount));
   };
 
+  // A RETURN IS NOT A DISCOUNT ON THE ORIGINAL BILL.
+  //
+  // These lists used to be built from getNetTxView(), which takes the returned
+  // quantity back off a sale. On a screen listing what was sold that is the
+  // right view. On a BILL it is the wrong one, because the database does not
+  // settle a return that way: post_return() leaves the sale's receivable
+  // exactly as it was and raises a SEPARATE payable for whatever was not
+  // refunded in cash - the shop now owes the customer, rather than the customer
+  // owing less.
+  //
+  // Netting it here as well counted the same return twice. On the first shop
+  // imported it made this device read 43,696.92 of customer due where the
+  // database said 45,424.66 - short by 1,602.00, which is exactly the return
+  // credit the database was carrying as a payable at the same moment.
+  //
+  // So the bill keeps its own value and the return stands on its own, which is
+  // what the books say and what every screen already shows: the credit page
+  // takes its balances from v_bill_balances, not from here.
+  //
+  // getNetTxView() is untouched and still used everywhere a sale is LISTED.
   data.credits = data.credits.map(c => {
     const credit = { ...c };
     if(credit.billId) {
       const billSales = data.transactions
         .filter(t => t.type === 'sale' && String(t.billId || '') === String(credit.billId))
-        .map(getNetTxView)
-        .filter(t => t.qty > 0.0001);
+        .filter(t => (Number(t.qty) || 0) > 0.0001);
       if(billSales.length) {
         credit.txId = billSales[0].id;
         credit.txIds = billSales.map(t => t.id);
@@ -8415,12 +8434,12 @@ function __reconcileDataConsistencyImpl() {
     } else {
       const linkedSale = data.transactions.find(t => String(t.id) === String(credit.txId) && t.type === 'sale');
       if(linkedSale) {
-        const netSale = getNetTxView(linkedSale);
+        // Same rule as the bill branch above: the sale's own value, not the
+        // value left after a return. The return is its own document.
         credit.txId = linkedSale.id;
-        credit.total = billTotalAfterDiscount([netSale.docBillDiscount !== undefined
-          ? netSale : { ...netSale, docBillDiscount: linkedSale.docBillDiscount }]);
+        credit.total = billTotalAfterDiscount([linkedSale]);
         credit.date = linkedSale.date;
-        credit.products = [{ productId: linkedSale.productId, qty: netSale.qty, price: linkedSale.price }];
+        credit.products = [{ productId: linkedSale.productId, qty: Number(linkedSale.qty) || 0, price: linkedSale.price }];
         credit.productId = linkedSale.productId;
       } else {
         credit.total = round2(Number(credit.total) || 0);
