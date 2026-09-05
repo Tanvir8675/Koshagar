@@ -4507,8 +4507,8 @@ function repairNextIdsFromData() {
 }
 
 async function loadDataFromFirestore() {
-  // Single source of truth: app data loads only from KoshDB SQLite.
-  return false;
+  // OFF by switch, not by deletion - see config.js (KOSH_LEGACY).
+  if (!(window.KOSH_LEGACY && window.KOSH_LEGACY.firestoreSync)) return false;
   if(window.__syncLockout) return false; // P1.1: no concurrent cloud loads
   window.__syncLockout = true;
   try {
@@ -4559,8 +4559,8 @@ async function loadDataFromFirestore() {
 }
 
 async function saveDataToFirestore() {
-  // Single source of truth: app data writes only to KoshDB SQLite.
-  return false;
+  // OFF by switch, not by deletion - see config.js (KOSH_LEGACY).
+  if (!(window.KOSH_LEGACY && window.KOSH_LEGACY.firestoreSync)) return false;
   window.__pendingCloudSave = true; // P1.1: mark cloud save in flight
   try {
     if(!normalizeUserId(currentUserId)) { window.__pendingCloudSave = false; return false; }
@@ -13073,8 +13073,8 @@ async function backendSaveUserData(userId, dataPayload, idsPayload) {
 // phones/other devices) every call fails silently and the app is unaffected.
 // Newer-wins on load prevents a stale backup read from clobbering newer data.
 async function saveDataToBackend() {
-  // Single source of truth: app data writes only to KoshDB SQLite.
-  return false;
+  // OFF by switch, not by deletion - see config.js (KOSH_LEGACY).
+  if (!(window.KOSH_LEGACY && window.KOSH_LEGACY.ownBackendSync)) return false;
   try {
     const uid = normalizeUserId(currentUserId);
     if(!uid) return false;
@@ -13106,8 +13106,8 @@ async function saveDataToBackend() {
 }
 
 async function loadDataFromBackend() {
-  // Single source of truth: app data loads only from KoshDB SQLite.
-  return false;
+  // OFF by switch, not by deletion - see config.js (KOSH_LEGACY).
+  if (!(window.KOSH_LEGACY && window.KOSH_LEGACY.ownBackendSync)) return false;
   try {
     const uid = normalizeUserId(currentUserId);
     if(!uid) return false;
