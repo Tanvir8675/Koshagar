@@ -181,37 +181,17 @@ async function savePayment() {
     label: 'savePayment',
     refresh: 'tx',
     successToast: '✅ Payment recorded successfully!',
-    mutate: async () => {
-      if(activePayCreditId !== null) {
-        const credit = data.credits.find(c=>c.id===activePayCreditId);
-        if(!credit) return;
-        data.payments.push({ id: makeTimeId('payment'), creditId: credit.id, amount, date: toIsoFromLocalDate(date), note });
-        // due/settled are derived live; never persist stale copies.
-        delete credit.due;
-        delete credit.settled;
-        auditLog('customer_payment_saved', creditAuditContext(credit, { amount, paymentDate: date, note }));
-      } else {
-        let remain = amount;
-        const credits = getOpenCustomerCreditsByKey(activePayCustomerKey);
-        credits.forEach(c => {
-          if(remain <= 0.0001) return;
-          const cdue = getCreditDue(c);
-          const take = round2(Math.min(remain, cdue));
-          if(take > 0) {
-            data.payments.push({ id: makeTimeId('payment'), creditId: c.id, amount: take, date: toIsoFromLocalDate(date), note: note || 'Grouped payment' });
-            remain = round2(remain - take);
-          }
-        });
-        auditLog('customer_group_payment_saved', cleanAuditDetails({
-          customerKey: activePayCustomerKey,
-          customer: credits[0]?.customerName,
-          customerPhone: credits[0]?.customerPhone,
-          billsPaid: credits.length,
-          creditIds: credits.map(c => c.id),
-          amount,
-          paymentDate: date
-        }));
-      }
+    // record_payment allocates against the party's OPEN bills oldest first and
+    // refuses anything above what is owed. The old app had no such guard, which
+    // is how 6,026.22 of impossible payments reached the books.
+    server: () => {
+      const credit = activePayCreditId !== null
+        ? data.credits.find(c => c.id === activePayCreditId)
+        : getOpenCustomerCreditsByKey(activePayCustomerKey)[0];
+      if(!credit || !credit.partyId) throw new Error('No customer selected for this payment.');
+      return KoshWrite.recordPayment({
+        date, party: credit.partyId, direction: 'in', amount, note
+      });
     },
     onSuccess: () => closePayModal()
   });
@@ -228,21 +208,25 @@ async function deleteCredit(creditId) {
     toast('⚠️ Only fully-paid customer bills can be deleted.');
     return;
   }
-  const pin = window.prompt('Enter admin PIN to archive settled customer record:', '');
-  if(pin === null || !await verifyAdminPinInput(pin)) { toast('❌ Wrong PIN. Please try again.'); return; }
-  const reason = (window.prompt('Archive reason (required):', '') || '').trim();
-  if(!reason) { toast('⚠️ Please enter a reason.'); return; }
-  if(!(await appConfirm('Archive settled customer record?', 'History will be preserved and hidden from active due lists.', { okText: 'Archive' }))) return;
+  // One panel: the reason and the password together, verified before it closes.
+  // This was three browser boxes in a row - a prompt for the PIN, a prompt for
+  // the reason, then a confirm - each one outside the app and each one able to
+  // be dismissed into an unexplained nothing.
+  const reason = await appPromptText(
+    'Archive this settled record?',
+    'It stays in the history and can still be read - it only leaves the list of '
+    + 'people who still owe you.',
+    { placeholder: 'Why are you archiving it?', okText: 'Archive', required: true, password: true }
+  );
+  if(reason === null) return;
   await runEngineCommand({
     label: 'deleteCredit',
     refresh: 'tx',
     successToast: '🗂 Archived',
-    mutate: async () => {
-      credit.archived = true;
-      credit.archivedAt = new Date().toISOString();
-      credit.archiveReason = reason;
-      auditLog('customer_credit_archived', creditAuditContext(credit, { reason }));
-    }
+    // The flag lives on the bill in the database now. It used to be set on the
+    // browser's copy only, so the record came straight back on the next reload
+    // and the shopkeeper archived it again, and again.
+    server: () => KoshWrite.archiveBill(credit.id, reason)
   });
 }
 
@@ -257,21 +241,18 @@ async function deleteSupplierCredit(scId) {
     toast('⚠️ Only fully-paid supplier bills can be deleted.');
     return;
   }
-  const pin = window.prompt('Enter admin PIN to archive settled supplier record:', '');
-  if(pin === null || !await verifyAdminPinInput(pin)) { toast('❌ Wrong PIN. Please try again.'); return; }
-  const reason = (window.prompt('Archive reason (required):', '') || '').trim();
-  if(!reason) { toast('⚠️ Please enter a reason.'); return; }
-  if(!(await appConfirm('Archive settled supplier record?', 'History will be preserved and hidden from active due lists.', { okText: 'Archive' }))) return;
+  const reason = await appPromptText(
+    'Archive this settled record?',
+    'It stays in the history and can still be read - it only leaves the list of '
+    + 'suppliers you still owe.',
+    { placeholder: 'Why are you archiving it?', okText: 'Archive', required: true, password: true }
+  );
+  if(reason === null) return;
   await runEngineCommand({
     label: 'deleteSupplierCredit',
     refresh: 'tx',
     successToast: '🗂 Supplier record archived',
-    mutate: async () => {
-      sc.archived = true;
-      sc.archivedAt = new Date().toISOString();
-      sc.archiveReason = reason;
-      auditLog('supplier_credit_archived', supplierCreditAuditContext(sc, { reason }));
-    }
+    server: () => KoshWrite.archiveBill(sc.id, reason)
   });
 }
 
@@ -395,62 +376,51 @@ async function saveEditPayment() {
     label: type === 'supplier' ? 'editSupplierPayment' : 'editCustomerPayment',
     refresh: 'tx',
     successToast: '✅ Payment updated',
-    mutate: async () => {
-      const arr = type === 'supplier' ? (data.supplierPayments||[]) : (data.payments||[]);
-      const idx = arr.findIndex(x => String(x.id) === String(paymentId));
-      if(idx === -1) throw new Error('Payment not found');
-      const old = { amount: arr[idx].amount, date: arr[idx].date, note: arr[idx].note };
-      arr[idx].amount = amount;
-      arr[idx].date = toIsoFromLocalDate(date);
-      arr[idx].note = note;
-      if(type === 'supplier') {
-        const sp = arr[idx];
-        const sc = (data.supplierCredits || []).find(c => String(c.id) === String(sp.scId));
-        auditLog('supplier_payment_edited', supplierCreditAuditContext(sc, {
-          paymentId,
-          oldAmount: old.amount,
-          newAmount: amount,
-          oldDate: dateToYMDLocal(old.date),
-          newDate: date,
-          note
-        }));
-      } else {
-        const cp = arr[idx];
-        const cr = (data.credits || []).find(c => String(c.id) === String(cp.creditId));
-        auditLog('customer_payment_edited', creditAuditContext(cr, {
-          paymentId,
-          oldAmount: old.amount,
-          newAmount: amount,
-          oldDate: dateToYMDLocal(old.date),
-          newDate: date,
-          note
-        }));
-      }
+    // The database reverses the payment and takes the corrected one in the same
+    // transaction, then allocates it across the open bills again from scratch.
+    // The party's due, the drawer and the bill's paid/unpaid state are all read
+    // back from those allocations, so none of them can be left behind.
+    server: () => {
+      const arr = type === 'supplier' ? (data.supplierPayments || []) : (data.payments || []);
+      const row = arr.find(x => String(x.id) === String(paymentId));
+      if(!row) throw new Error('Payment not found');
+      if(!row.partyId) throw new Error('This payment is not linked to a customer or supplier.');
+      return KoshWrite.editPayment({
+        id: row.paymentId || row.id,
+        date,
+        party: row.partyId,
+        direction: type === 'supplier' ? 'out' : 'in',
+        amount,
+        method: row.method || 'cash',
+        note,
+        summary: describeChanges([
+          ['Amount', round2(Number(row.amount) || 0), amount, fmt],
+          ['Date', dateToYMDLocal(row.date) || '', date],
+          ['Note', String(row.note || ''), note]
+        ])
+      });
     },
     onSuccess: () => closeEditPayModal()
   });
 }
 
 async function deletePaymentEntry(paymentId, type) {
-  if(!confirm('Delete this payment? The outstanding amount will increase accordingly.')) return;
+  if(!(await appConfirm(
+    'Remove this payment?',
+    'The bill goes back to owing what this payment had settled.',
+    { okText: 'Remove' }
+  ))) return;
   await runEngineCommand({
     label: type === 'supplier' ? 'deleteSupplierPayment' : 'deleteCustomerPayment',
     refresh: 'tx',
-    successToast: 'Payment removed',
-    mutate: async () => {
-      if(type === 'supplier') {
-        const sp = (data.supplierPayments||[]).find(p=>String(p.id)===String(paymentId));
-        if(!sp) throw new Error('Payment not found');
-        const sc = (data.supplierCredits || []).find(c => String(c.id) === String(sp.scId));
-        data.supplierPayments = data.supplierPayments.filter(p=>String(p.id)!==String(paymentId));
-        auditLog('supplier_payment_deleted', supplierCreditAuditContext(sc, { paymentId, amount: sp.amount }));
-      } else {
-        const cp = (data.payments||[]).find(p=>String(p.id)===String(paymentId));
-        if(!cp) throw new Error('Payment not found');
-        const cr = (data.credits || []).find(c => String(c.id) === String(cp.creditId));
-        data.payments = data.payments.filter(p=>String(p.id)!==String(paymentId));
-        auditLog('customer_payment_deleted', creditAuditContext(cr, { paymentId, amount: cp.amount }));
-      }
+    successToast: 'Payment reversed',
+    // Reversed, not deleted: the money is put back on the party's account and
+    // taken out of the drawer again, and both halves stay readable.
+    server: () => {
+      const arr = type === 'supplier' ? (data.supplierPayments || []) : (data.payments || []);
+      const row = arr.find(p => String(p.id) === String(paymentId));
+      if(!row) throw new Error('Payment not found');
+      return KoshWrite.deletePayment(row.paymentId || row.id, 'Removed in the app');
     }
   });
 }
@@ -471,38 +441,14 @@ async function saveSupplierPayment() {
     label: 'saveSupplierPayment',
     refresh: 'tx',
     successToast: '✅ Supplier payment recorded!',
-    mutate: async () => {
-      if(!data.supplierPayments) data.supplierPayments = [];
-      if(activeSupCreditId !== null) {
-        const sc = data.supplierCredits.find(s=>s.id===activeSupCreditId);
-        if(!sc) return;
-        data.supplierPayments.push({ id: makeTimeId('supplierPayment'), scId: sc.id, amount, date: toIsoFromLocalDate(date), note });
-        // due/settled are derived live; never persist stale copies.
-        delete sc.due;
-        delete sc.settled;
-        auditLog('supplier_payment_saved', supplierCreditAuditContext(sc, { amount, paymentDate: date, note }));
-      } else {
-        let remain = amount;
-        const credits = getOpenSupplierCreditsByKey(activeSupSupplierKey);
-        credits.forEach(sc => {
-          if(remain <= 0.0001) return;
-          const sdue = getSupplierDue(sc);
-          const take = round2(Math.min(remain, sdue));
-          if(take > 0) {
-            data.supplierPayments.push({ id: makeTimeId('supplierPayment'), scId: sc.id, amount: take, date: toIsoFromLocalDate(date), note: note || 'Grouped payment' });
-            remain = round2(remain - take);
-          }
-        });
-        auditLog('supplier_group_payment_saved', cleanAuditDetails({
-          supplierKey: activeSupSupplierKey,
-          supplier: credits[0]?.supplierName,
-          supplierPhone: credits[0]?.supplierPhone,
-          billsPaid: credits.length,
-          scIds: credits.map(sc => sc.id),
-          amount,
-          paymentDate: date
-        }));
-      }
+    server: () => {
+      const sc = activeSupCreditId !== null
+        ? data.supplierCredits.find(x => x.id === activeSupCreditId)
+        : getOpenSupplierCreditsByKey(activeSupSupplierKey)[0];
+      if(!sc || !sc.partyId) throw new Error('No supplier selected for this payment.');
+      return KoshWrite.recordPayment({
+        date, party: sc.partyId, direction: 'out', amount, note
+      });
     },
     onSuccess: () => closeSupplierPayModal()
   });

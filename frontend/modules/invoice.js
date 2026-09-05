@@ -1,8 +1,25 @@
 // modules/invoice.js - Invoice building / rendering / printing
 // Classic script sharing index.html's global scope.
 
+// WHAT THE PRINTED INVOICE IS NUMBERED.
+//
+// The database numbers documents by kind: sales are INV-2026-000004, purchases
+// are PUR-2026-000002. On a printed invoice those two read as unrelated series,
+// and the sale's number does not say what it is.
+//
+// So the printed number carries both: what the paper is (INV) and what it is
+// for (SEL / PUR).
+//
+//   INV-2026-000004  ->  INV-SEL-2026-000004
+//   PUR-2026-000002  ->  INV-PUR-2026-000002
+//
+// The stored number is untouched - the transaction rows, the search and every
+// record still show the document's own number. This is the letterhead, not the
+// identity.
 function buildInvoiceNo(tx) {
-  if(tx?.billId) return `INV-${String(tx.billId).replace(/\s+/g, '')}`;
+  // The same rule the transaction rows and the credit page use; see
+  // displayBillNo() in index.html. One document, one number, every screen.
+  if(tx?.billId) return displayBillNo(tx.billId);
   const dt = dateToYMDLocal(tx?.date || new Date()) || todayStr();
   return `INV-${dt.replace(/-/g, '')}-${String(tx?.id || makeTimeId())}`;
 }
@@ -85,22 +102,35 @@ function buildInvoicePayloadFromTx(tx) {
   const customerPhone = type === 'sale' ? getTxCustomerPhoneForInvoice(first) : '';
   const supplierName = type === 'purchase' ? getTxSupplierName(first) : '';
   const supplierPhone = type === 'purchase' ? getTxSupplierPhoneForInvoice(first) : '';
-  const derivedTotal = round2(lines.reduce((s, l) => s + (Number(l.total) || 0), 0));
+  // A DISCOUNT GIVEN ON THE WHOLE BILL IS NOT ON ANY LINE.
+  //
+  // It lives on the document header (sales.bill_discount / purchases.
+  // bill_discount) and the lines know nothing about it. Adding the lines up and
+  // calling that the total printed an invoice that claimed a debt the customer
+  // did not have: 100 of goods, 90 paid, and the 10 that was DISCOUNTED shown
+  // as "Due". The database had already settled the bill in full - post_sale
+  // charges gross minus the discount and raises no receivable when it is paid.
+  //
+  // Counted once per bill: every row carries the same header figure, so summing
+  // it row by row would multiply it by the number of items.
+  const headerDiscount = round2(Number(first.docBillDiscount) || 0);
+  const derivedTotal = round2(Math.max(0,
+    lines.reduce((s, l) => s + (Number(l.total) || 0), 0) - headerDiscount));
   // Sum the SAME numbers the table prints, so the rows always add up to Sub Total.
   // (Was `qty × rounded unit price`, which drifted from the printed totals and
   // manufactured a fake discount on bills that had none.)
   const derivedSubTotal = round2(lines.reduce((s, l) => s + getInvoiceLineView(l).lineTotal, 0));
-  const hasBillMeta = !!first.billId &&
-    Number.isFinite(Number(first.billGrossTotal)) &&
-    Number.isFinite(Number(first.billDiscountTotal)) &&
-    Number.isFinite(Number(first.billNetTotal));
-  const hasPaidMeta = hasBillMeta && Number.isFinite(Number(first.billPaidTotal));
-  const subTotal = hasBillMeta ? round2(Number(first.billGrossTotal) || 0) : derivedSubTotal;
-  const discount = type === 'sale'
-    ? (hasBillMeta ? round2(Math.max(0, Number(first.billDiscountTotal) || 0)) : round2(Math.max(0, derivedSubTotal - derivedTotal)))
-    : 0;
-  const total = hasBillMeta ? round2(Number(first.billNetTotal) || 0) : derivedTotal;
-  let paid = hasPaidMeta ? round2(Number(first.billPaidTotal) || 0) : round2(lines.reduce((s, l) => s + (Number(l.cashPaid) || 0), 0));
+  const subTotal = derivedSubTotal;
+  // Both kinds of discount at once: what came off the lines, and what came off
+  // the bill. The gap between what the rows print and what the bill came to IS
+  // the discount, whichever way it was given.
+  //
+  // A purchase gets the same treatment now. It was hardcoded to zero, so a
+  // discounted purchase invoice showed a sub total and a total that did not
+  // agree and nothing in between to explain the gap.
+  const discount = round2(Math.max(0, derivedSubTotal - derivedTotal));
+  const total = derivedTotal;
+  let paid = round2(lines.reduce((s, l) => s + (Number(l.cashPaid) || 0), 0));
   if(Math.abs(total - paid) <= 0.1) paid = total;
   const due = Math.max(0, round2(total - paid));
   const date = dateToYMDLocal(first.date) || todayStr();
@@ -157,9 +187,9 @@ function renderInvoiceHtml(inv) {
     </tr>`;
   }).join('');
   return `<div id="printInvoiceRoot" style="font-family:Arial, Helvetica, sans-serif;color:#000;background:#fff;width:190mm;min-height:270mm;margin:0 auto;box-sizing:border-box;padding:22mm 18mm 18mm">
-    <div style="display:grid;grid-template-columns:34mm 1fr 34mm;align-items:start;margin-bottom:6mm">
-      <div><img src="${logoSrc}" alt="Logo" style="width:22mm;height:22mm;object-fit:contain"></div>
-      <div style="text-align:center;font-size:12px;text-decoration:underline;margin-top:1mm">INVOICE</div>
+    <div style="display:grid;grid-template-columns:40mm 1fr 40mm;align-items:start;margin-bottom:6mm">
+      <div><img src="${logoSrc}" alt="Logo" style="display:block;width:32mm;height:32mm;object-fit:contain"></div>
+      <div style="text-align:center;font-size:26px;font-weight:700;letter-spacing:3px;text-decoration:underline;text-underline-offset:4px;margin-top:6mm">INVOICE</div>
       <div></div>
     </div>
 
@@ -268,6 +298,31 @@ function printInvoice() {
     </style>
   </head><body>${activeInvoiceHtml}</body></html>`);
   w.document.close();
-  w.focus();
-  w.print();
+
+  // THE LOGO WENT MISSING FROM EVERY PRINTED INVOICE.
+  //
+  // print() was called on the line after document.close(), and the print dialog
+  // captures the page as it stands at that instant. The logo is an <img> with a
+  // URL - in the new window it has not been fetched yet, so what got printed was
+  // the empty box where it was going to be. On screen it looked right, because
+  // by then it had loaded.
+  //
+  // So: wait for every image to finish, then print. An image that FAILS resolves
+  // too - a missing logo is not a reason to refuse to print an invoice - and the
+  // whole wait is capped, so a hung request cannot leave the window sitting
+  // there with no dialog and no explanation.
+  const ready = Array.from(w.document.images).map((img) =>
+    (img.complete && img.naturalWidth > 0)
+      ? Promise.resolve()
+      : new Promise((done) => {
+          img.addEventListener('load', done, { once: true });
+          img.addEventListener('error', done, { once: true });
+        }));
+
+  Promise.race([
+    Promise.all(ready),
+    new Promise((done) => setTimeout(done, 3000))
+  ]).then(() => {
+    try { w.focus(); w.print(); } catch (_) { /* the window was closed by hand */ }
+  });
 }

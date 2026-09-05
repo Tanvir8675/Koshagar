@@ -7,7 +7,8 @@
   "scripts": {
     "build": "node frontend/build.mjs",
     "frontend": "node tools/local-static-server.cjs",
-    "dev": "node tools/local-dev-server.cjs"
+    "dev": "node tools/local-dev-server.cjs",
+    "import": "node tools/import-to-supabase.mjs"
   },
   "engines": {
     "node": "24.x"

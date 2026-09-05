@@ -71,9 +71,19 @@ async function addCashWithdrawal() {
       refresh: 'dashboard',
       keepDashboardPaging: true,
       successToast: '✅ Withdrawal updated',
-      mutate: async () => {
-        const w = data.cashWithdrawals.find(x => String(x.id) === editingWithdrawalId);
-        if(w) { w.amount = round2(amt); w.reason = reason; w.date = date; }
+      // Reversed and re-posted by the database in one transaction. The drawer
+      // is recomputed from the ledger, so the corrected amount is what every
+      // later day's cash balance is built on.
+      server: () => {
+        const was = (data.cashWithdrawals || []).find(x => String(x.id) === String(editingWithdrawalId)) || {};
+        return KoshWrite.editWithdrawal({
+          id: editingWithdrawalId, date, amount: round2(amt), reason,
+          summary: describeChanges([
+            ['Amount', round2(Number(was.amount) || 0), round2(amt), fmt],
+            ['Reason', String(was.reason || ''), reason],
+            ['Date', dateToYMDLocal(was.date) || '', date]
+          ])
+        });
       },
       onSuccess: () => cancelEditWithdrawal()
     });
@@ -83,9 +93,10 @@ async function addCashWithdrawal() {
       refresh: 'dashboard',
       keepDashboardPaging: true,
       successToast: '✅ Withdrawal recorded',
-      mutate: async () => {
-        data.cashWithdrawals.push({ id: getNextWithdrawalId(), date, amount: round2(amt), reason });
-      },
+      // The database refuses a withdrawal the drawer cannot cover. The old app
+      // had no such check, which is how the imported books contained days that
+      // ran thousands of taka negative.
+      server: () => KoshWrite.addWithdrawal({ date, amount: round2(amt), reason }),
       onSuccess: () => {
         amtEl.value    = '';
         reasonEl.value = '';
@@ -101,12 +112,10 @@ async function deleteCashWithdrawal(id) {
   if(w && !(await requireMonthUnlockOverride(w.date, 'withdrawal delete'))) return;
   await runEngineCommand({
     label: 'deleteCashWithdrawal',
-    refresh: 'both',
+    refresh: 'dashboard',
     keepDashboardPaging: true,
-    successToast: '🗑️ Withdrawal removed',
-    mutate: async () => {
-      data.cashWithdrawals = data.cashWithdrawals.filter(x => String(x.id) !== String(id));
-    }
+    successToast: '🗑️ Withdrawal reversed',
+    server: () => KoshWrite.deleteWithdrawal(id, 'Removed in the app')
   });
 }
 // ── END CASH WITHDRAWALS ─────────────────────────────────────────

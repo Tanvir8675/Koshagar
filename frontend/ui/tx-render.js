@@ -23,7 +23,7 @@ function txRow(t, opts = {}) {
     : t.type==='purchase'
       ? getTxSupplierName(t)
       : '';
-  const billText = t.billId ? ` · Bill ${t.billId}` : '';
+  const billText = t.billId ? ` · Bill ${displayBillNo(t.billId)}` : '';
   // Linked original transaction info
   let linkedInfo = '';
   if(t.type==='return' && t.linkedTxId) {
@@ -79,11 +79,7 @@ function txRow(t, opts = {}) {
   const purchaseCostBreakdown = (t.type === 'purchase' && (Number(t.lineExtraCost) || 0) > 0)
     ? `<div style="font-size:0.68rem;color:var(--ink2);margin-top:2px;white-space:nowrap">Product Cost ${fmt(Number(t.total)||0)} + Extra ${fmt(Number(t.lineExtraCost)||0)}</div>`
     : '';
-  const editHistory = Array.isArray(t.editHistory) ? t.editHistory : [];
-  const latestEdit = editHistory.length ? editHistory[editHistory.length - 1] : null;
-  const editTrace = latestEdit
-    ? `<div style="font-size:0.68rem;color:var(--gold);margin-top:3px;padding:3px 7px;background:var(--gold-light);border-radius:6px;display:inline-block">Edited ${displayDateTime(latestEdit.at) || dateToYMDLocal(latestEdit.at) || ''}${Array.isArray(latestEdit.changes) && latestEdit.changes.length ? ` · ${escapeHtml(latestEdit.changes.slice(0, 3).join(' · '))}${latestEdit.changes.length > 3 ? ' · more' : ''}` : ''}</div>`
-    : '';
+  const editTrace = txEditNote(t);
   return `<div class="tx-item">
     <div class="tx-icon ${typeClass}">${typeIcon}</div>
     <div class="tx-body"><div class="tx-name">${p?.name||'?'}</div>
@@ -94,10 +90,10 @@ function txRow(t, opts = {}) {
         ${purchaseCostBreakdown}
         <div class="tx-type-tag">${typeLabel}</div>
       </div>
-      ${(!suppressInvoiceButton && (t.type === 'sale' || t.type === 'purchase')) ? `<button class="del-btn" style="color:var(--blue);opacity:0.75" onclick="openInvoiceFromTx(${t.id})" title="Print invoice">Invoice</button>` : ''}
-      ${t.type!=='return'?`<button class="del-btn" style="color:var(--gold);opacity:0.7" onclick="startReturnFromTx(${t.id})" title="Return this transaction">↩️</button>`:''}
-      <button class="del-btn" style="color:var(--blue);opacity:0.6" onclick="editTx(${t.id})" title="Edit this entry">✏️</button>
-      <button class="del-btn" onclick="deleteTx(${t.id})" title="Delete this entry" style="color:var(--red);opacity:0.6">✕</button>
+      ${(!suppressInvoiceButton && (t.type === 'sale' || t.type === 'purchase')) ? `<button class="del-btn" style="color:var(--blue);opacity:0.75" onclick="openInvoiceFromTx('${t.id}')" title="Print invoice">Invoice</button>` : ''}
+      ${t.type!=='return'?`<button class="del-btn" style="color:var(--gold);opacity:0.7" onclick="startReturnFromTx('${t.id}')" title="Return this transaction">↩️</button>`:''}
+      <button class="del-btn" style="color:var(--blue);opacity:0.6" onclick="editTx('${t.id}')" title="Edit this entry">✏️</button>
+      <button class="del-btn" onclick="deleteTx('${t.id}')" title="Delete this entry" style="color:var(--red);opacity:0.6">✕</button>
     </div>
   </div>`;
 }
@@ -177,6 +173,23 @@ function txQtyRateLabel(t, p) {
   const rate = eq > 0 ? round2(lineTotal / eq) : 0;
   return `${eq} ${t.entryUnit} (${baseQty} ${baseUnit}) · ${fmt(rate)}/${t.entryUnit}`;
 }
+// The "this entry was corrected" note, printed under the row it belongs to -
+// the same chip treatment as "Net after return", because it answers the same
+// kind of question: why this row does not say what you remember it saying.
+//
+// editedAt and editSummary come from document_edits, written by the database
+// when the correction was posted. A row without them was never edited, so this
+// returns nothing at all rather than an empty badge.
+function txEditNote(row, label = 'Edited') {
+  if(!row || !row.editedAt) return '';
+  const when = displayDateTime(row.editedAt) || dateToYMDLocal(row.editedAt) || '';
+  const what = String(row.editSummary || '').trim();
+  const text = [`${label}${when ? ' ' + when : ''}`, what].filter(Boolean).join(' · ');
+  // A span, not a div: these rows are not all block containers - the payment
+  // history lines put their meta inside a span, and a div in there is invalid.
+  return `<span style="font-size:0.68rem;color:var(--gold);margin-top:3px;padding:3px 7px;background:var(--gold-light);border-radius:6px;display:inline-block">✏️ ${escapeHtml(text)}</span>`;
+}
+
 function getDisplayLineTotal(tx) {
   if(!tx) return 0;
   if(tx.type === 'purchase') {
@@ -213,14 +226,31 @@ function groupTxnsByBill(txns, mode) {
       g.grossTotal = g.total;
       g.discount = 0;
     } else {
-      g.total = round2(g.rows.reduce((s, t) => s + (Number(t.total) || 0), 0));
+      // A DISCOUNT GIVEN ON THE WHOLE BILL IS NOT A LINE TOTAL.
+      //
+      // It lives on the sale header (sales.bill_discount) and the lines know
+      // nothing about it, so summing the lines gave the bill BEFORE the
+      // discount and called it the total. A 100 bill with 10 off was shown as
+      // 100 with 90 paid, and the missing 10 read as an unpaid balance the
+      // customer did not owe - the database had already settled it in full.
+      //
+      // Counted once per bill: every row of a bill carries the same header
+      // figure, so adding it up row by row would multiply it by the item count.
+      const headerDiscount = round2(Number(g.rows[0] && g.rows[0].docBillDiscount) || 0);
+      const lineSum = round2(g.rows.reduce((s, t) => s + (Number(t.total) || 0), 0));
+      g.total = round2(Math.max(0, lineSum - headerDiscount));
       const recomputedGross = round2(g.rows.reduce((s, t) => s + getDisplayLineTotal(t), 0));
       g.grossTotal = recomputedGross;
       // Always derive visible discount from visible rows to avoid mismatch after returns/deletes.
+      // With the header discount now inside g.total, this covers both kinds.
       g.discount = round2(Math.max(0, g.grossTotal - g.total));
     }
     if(mode === 'sale') {
-      const grossProfit = round2(g.rows.reduce((s, t) => s + round2((Number(t.total) || 0) - (typeof getSaleCostTotal === 'function' ? getSaleCostTotal(t) : round2((Number(t.cost) || 0) * (Number(t.qty) || 0)))), 0));
+      // The bill's discount comes off the profit too - it is money the shop
+      // agreed not to take, so counting it as earned would be the same error
+      // one line up.
+      const billHeaderDiscount = round2(Number(g.rows[0] && g.rows[0].docBillDiscount) || 0);
+      const grossProfit = round2(g.rows.reduce((s, t) => s + round2((Number(t.total) || 0) - (typeof getSaleCostTotal === 'function' ? getSaleCostTotal(t) : round2((Number(t.cost) || 0) * (Number(t.qty) || 0)))), 0) - billHeaderDiscount);
       const rowIds = new Set(g.rows.map(r => String(r.id)));
       const linkedReturns = (data.transactions || []).filter(t =>
         t &&
@@ -269,7 +299,7 @@ function txReturnGroupRow(g) {
   const dt = displayDateTime(g.date) || dateToYMDLocal(g.date) || '-';
   const metaParts = [`${g.rows.length} item${g.rows.length>1?'s':''}`, `Date: ${dt}`];
   if(g.returnGroupId) metaParts.push(`Return ID: ${g.returnGroupId}`);
-  if(g.sourceBillId) metaParts.push(`From Bill: ${g.sourceBillId}`);
+  if(g.sourceBillId) metaParts.push(`From Bill: ${displayBillNo(g.sourceBillId)}`);
   const customerNames = [...new Set(g.rows
     .map(r => {
       const orig = r.linkedTxId ? data.transactions.find(tx=>tx.id===r.linkedTxId) : null;
@@ -310,7 +340,7 @@ function txGroupRow(g, opts = {}) {
   const partyLabel = g.party ? (g.mode === 'sale' ? 'Customer' : 'Supplier') : '';
   const items = g.rows.map(r => txRow(r, { suppressPartyBadge: true, suppressInvoiceButton: true })).join('');
   const metaParts = [`${g.rows.length} item${g.rows.length>1?'s':''}`, `Date: ${dt}`];
-  if(g.billId) metaParts.push(`Bill: ${g.billId}`);
+  if(g.billId) metaParts.push(`Bill: ${displayBillNo(g.billId)}`);
   const partyTitle = g.party
     ? `<div style="font-size:0.76rem;color:var(--ink2);line-height:1.2;margin-top:3px;padding:3px 7px;background:${g.mode==='sale'?'var(--green-light)':'var(--blue-light)'};border-radius:6px;display:inline-block">${g.mode==='sale'?'👤':'🏪'} ${partyLabel}: <span style="font-weight:700;color:var(--ink)">${g.party}</span></div>`
     : '';

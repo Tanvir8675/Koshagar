@@ -84,36 +84,84 @@ function renderSaleReport() {
   const snap = calc.snap;
   const metrics = calc.metrics;
   const saleAgg = calc.report.saleReportAgg;
-  const grossRev2   = metrics.sales.grossRevenue;
-  const returnTotal2= metrics.sales.returnRevenue;
-  const rev         = metrics.sales.netRevenue;
-  const profit      = metrics.sales.profit;
+  const srvEarned = window.KoshTotals
+    ? KoshTotals.profitFor(rType2, rDate2, () => scheduleReportRender(0))
+    : null;
+  const pickEarned = (field, local) => (srvEarned && srvEarned[field] != null)
+    ? round2(Number(srvEarned[field]))
+    : local;
+  const grossRev2   = pickEarned('gross_revenue', metrics.sales.grossRevenue);
+  const returnTotal2= pickEarned('sale_return_revenue', metrics.sales.returnRevenue);
+  const billDiscount2 = pickEarned('bill_discount', metrics.sales.billDiscount || 0);
+  const rev         = pickEarned('net_revenue', metrics.sales.netRevenue);
+  const profit      = pickEarned('profit', metrics.sales.profit);
   const margin      = rev > 0 ? (profit/rev*100).toFixed(1) : 0;
+  // The cash figures come from the database - cash_summary() for exactly this
+  // period. See data/server-totals.js. When the answer for a newly chosen
+  // period has not arrived yet, or the server cannot be reached, these fall
+  // back to this device's arithmetic and the card says so.
+  const srvCash = window.KoshTotals
+    ? KoshTotals.rowFor(rType2, rDate2, () => scheduleReportRender(0))
+    : null;
+  // Stock and the two dues are a POSITION at the period's end, not a flow
+  // through it, so they come from a different call. Same figures the Ledger tab
+  // shows - taken from the same place, so the two tabs cannot disagree.
+  const srvPos = window.KoshTotals
+    ? KoshTotals.snapshotFor(rType2, rDate2, () => scheduleReportRender(0))
+    : null;
+  const pick = (field, local) => (srvCash && srvCash[field] != null)
+    ? round2(Number(srvCash[field]))
+    : local;
+  const pickPos = (field, local) => (srvPos && srvPos[field] != null)
+    ? round2(Number(srvPos[field]))
+    : local;
+
   const periodCashRev = metrics.sales.cashSales;
-  const periodSaleCashIn = metrics.sales.saleCashIn;
-  const periodSaleReturnCashOut = metrics.sales.saleReturnCashOut;
-  const periodPayments = metrics.cash.periodPaymentsReceived;
+  const periodSaleCashIn = pick('sale_cash_in', metrics.sales.saleCashIn);
+  const periodSaleReturnCashOut = pick('sale_return_out', metrics.sales.saleReturnCashOut);
+  const periodPayments = pick('customer_payment_in', metrics.cash.periodPaymentsReceived);
   const periodPurchase = metrics.purchase.cashOutNow;
-  const periodPurchasePaid = metrics.purchase.cashPaidAtBuy;
-  const periodPurchaseExtraCost = metrics.purchase.extraCostCashOut || 0;
-  const periodSupplierDuePaid = metrics.purchase.supplierDuePaidCashOut;
-  const periodLoanPaymentCashOut = metrics.cash.loanPaymentCashOut || 0;
-  const periodPurchaseReturnCashBack = metrics.purchase.purchaseReturnCashIn;
-  const periodOpeningCash = metrics.cash.openingCash;
+  const periodPurchasePaid = pick('purchase_goods_out', metrics.purchase.cashPaidAtBuy);
+  const periodPurchaseExtraCost = pick('purchase_extra_out', metrics.purchase.extraCostCashOut || 0);
+  const periodSupplierDuePaid = pick('supplier_payment_out', metrics.purchase.supplierDuePaidCashOut);
+  const periodLoanPaymentCashOut = pick('loan_payment_out', metrics.cash.loanPaymentCashOut || 0);
+  const periodPurchaseReturnCashBack = pick('purchase_return_in', metrics.purchase.purchaseReturnCashIn);
+  const periodOpeningCash = pick('opening_cash', metrics.cash.openingCash);
   const periodCapitalCashIn = metrics.cash.capitalCashIn || 0;
+  // Borrowed money is not investment. capitalCashIn is the two added together,
+  // so showing it against "Investment In" told the shopkeeper they had put in
+  // money they had actually borrowed - and the row it belongs on already exists
+  // on the dashboard. Split here the same way.
+  const periodLoanCashIn = pick('loan_in', metrics.cash.loanCashIn || 0);
+  // The server keeps loans out of capital_movements entirely, so its
+  // investment_in needs no subtraction - the split is structural there.
+  const periodInvestmentCashIn = pick('investment_in',
+                                      round2(periodCapitalCashIn - (metrics.cash.loanCashIn || 0)));
   const periodCapitalRows = (calc.snap?.capitalInRaw || []).slice().sort((a,b)=>new Date(a.date)-new Date(b.date));
-  const periodNetCash = metrics.cash.closingCash;
-  const periodStockValue = metrics.business.stockValue;
-  const totalCustomerDue = metrics.business.customerDueAll;
-  const totalSupplierDue = metrics.business.supplierDueAll;
-  const periodNetBusinessWorth = metrics.business.netBusinessWorth;
-  const periodExtraExpenses = metrics.cash.extraExpensesTotal || 0;
+  const periodNetCash = pick('cash_in_hand', metrics.cash.closingCash);
+  const periodTotalIncome = pick('total_in', metrics.cash.totalIncomeBreakdown);
+  const periodTotalCost = pick('total_out', metrics.cash.totalCostBreakdown);
+  const periodNetCashChange = pick('net_cash_change', metrics.cash.netCashChange);
+  // Said once, under the card: whose arithmetic these figures are. Nothing is
+  // shown when they are the book's own, which is the normal case.
+  const periodCashNote = (srvCash && srvPos) ? '' : `
+      <div style="margin-top:8px;padding:8px 10px;border:1px solid var(--border);border-radius:9px;background:var(--surface)">
+        <div style="font-size:0.72rem;color:var(--ink2)">
+          \u23f3 Worked out on this device. The server's figures for this period are
+          on their way, or it could not be reached.
+        </div>
+      </div>`;
+  const periodStockValue = pickPos('stock_value', metrics.business.stockValue);
+  const totalCustomerDue = pickPos('receivable', metrics.business.customerDueAll);
+  const totalSupplierDue = pickPos('payable', metrics.business.supplierDueAll);
+  const periodNetBusinessWorth = pickPos('business_worth', metrics.business.netBusinessWorth);
+  const periodExtraExpenses = pick('expense_out', metrics.cash.extraExpensesTotal || 0);
   const periodExtraExpensesList = metrics.cash.extraExpensesList || [];
   // Already inside totalCostBreakdown/closingCash — itemise them or the Cost rows
   // don't add up to "Total Cost" and the money looks like it silently disappeared.
-  const periodCashWithdrawals = metrics.cash.cashWithdrawalsTotal || 0;
+  const periodCashWithdrawals = pick('withdrawal_out', metrics.cash.cashWithdrawalsTotal || 0);
   const periodCashWithdrawalsList = metrics.cash.cashWithdrawalsList || [];
-  const periodCapitalCashOut = metrics.cash.capitalCashOut || 0;
+  const periodCapitalCashOut = pick('capital_out', metrics.cash.capitalCashOut || 0);
   pgSyncQuery('rTxList', saleTxQ);
 
   const saleBreakdownTitle = rType2 === 'daily'
@@ -122,7 +170,7 @@ function renderSaleReport() {
       ? "💵 Weekly Cash Summary"
       : (rType2 === 'yearly' ? "💵 Yearly Cash Summary (YTD)" : "💵 Monthly Cash Summary"));
   document.getElementById('rStats').innerHTML=`
-    <div class="stat"><div class="stat-label">Net Revenue</div><div class="stat-value ${rev>=0?'gold':'red'}">${fmt(rev)}</div><div class="stat-sub">Sales ${fmt(grossRev2)}${returnTotal2>0?' − Returns '+fmt(returnTotal2):''}</div></div>
+    <div class="stat"><div class="stat-label">Net Revenue</div><div class="stat-value ${rev>=0?'gold':'red'}">${fmt(rev)}</div><div class="stat-sub">Sales ${fmt(grossRev2)}${billDiscount2>0?' − Discount '+fmt(billDiscount2):''}${returnTotal2>0?' − Returns '+fmt(returnTotal2):''}</div></div>
     <div class="stat"><div class="stat-label">Profit</div><div class="stat-value ${profit>=0?'green':'red'}">${fmt(profit)}</div></div>
     <div class="stat"><div class="stat-label">Sales</div><div class="stat-value blue">${saleAgg.txCount}</div><div class="stat-sub">${saleAgg.returnCount} returned</div></div>
     <div class="stat"><div class="stat-label">Margin</div><div class="stat-value ${profit>=0?'green':'red'}">${margin}%</div></div>
@@ -142,36 +190,38 @@ function renderSaleReport() {
           <div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Sale Cash In</div><div style="font-weight:700;color:var(--green)">+${fmt(periodSaleCashIn)}</div></div>
           ${periodPayments>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Due Received</div><div style="font-weight:700;color:var(--green)">+${fmt(periodPayments)}</div></div>`:''}
           ${periodPurchaseReturnCashBack>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Purchase Return Cash Back</div><div style="font-weight:700;color:var(--green)">+${fmt(periodPurchaseReturnCashBack)}</div></div>`:''}
-          <div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Investment In</div><div style="font-weight:700;color:var(--green)">+${fmt(periodCapitalCashIn)}</div></div>
+          ${periodLoanCashIn>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Loan In</div><div style="font-weight:700;color:var(--green)">+${fmt(periodLoanCashIn)}</div></div>`:''}
+          <div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Investment In</div><div style="font-weight:700;color:var(--green)">+${fmt(periodInvestmentCashIn)}</div></div>
           <div style="display:flex;justify-content:space-between;align-items:center;border-top:1px dashed var(--border);margin-top:6px;padding-top:8px">
             <div style="font-size:0.8rem;font-weight:700">Total Income</div>
-            <div style="font-weight:700;color:var(--green);font-family:'Instrument Serif',serif">${fmt(metrics.cash.totalIncomeBreakdown)}</div>
+            <div style="font-weight:700;color:var(--green);font-family:'Instrument Serif',serif">${fmt(periodTotalIncome)}</div>
           </div>
         </div>
         <div style="background:var(--blue-light);border:1px solid var(--border);border-radius:10px;padding:10px">
           <div style="font-size:0.72rem;font-weight:700;color:var(--blue);text-transform:uppercase;margin-bottom:6px">Cost</div>
-          <div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Purchase Paid (Cash)</div><div style="font-weight:700;color:var(--blue)">-${fmt(periodPurchasePaid)}</div></div>
+          <div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Purchase Paid (Cash)</div><div style="font-weight:700;color:var(--red)">-${fmt(periodPurchasePaid)}</div></div>
           ${periodPurchaseExtraCost>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Purchase Extra Costing</div><div style="font-weight:700;color:var(--red)">-${fmt(periodPurchaseExtraCost)}</div></div>`:''}
           ${periodSaleReturnCashOut>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Sale Return Refund</div><div style="font-weight:700;color:var(--red)">-${fmt(periodSaleReturnCashOut)}</div></div>`:''}
-          ${periodSupplierDuePaid>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Supplier Due Paid</div><div style="font-weight:700;color:var(--blue)">-${fmt(periodSupplierDuePaid)}</div></div>`:''}
-          ${periodLoanPaymentCashOut>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Loan Payment</div><div style="font-weight:700;color:var(--blue)">-${fmt(periodLoanPaymentCashOut)}</div></div>`:''}
+          ${periodSupplierDuePaid>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Supplier Due Paid</div><div style="font-weight:700;color:var(--red)">-${fmt(periodSupplierDuePaid)}</div></div>`:''}
+          ${periodLoanPaymentCashOut>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Loan Payment</div><div style="font-weight:700;color:var(--red)">-${fmt(periodLoanPaymentCashOut)}</div></div>`:''}
           ${periodExtraExpenses>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Extra Expenses</div><div style="font-weight:700;color:var(--red)">-${fmt(periodExtraExpenses)}</div></div>`:''}
           ${periodCashWithdrawals>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Owner Withdrawal</div><div style="font-weight:700;color:var(--red)">-${fmt(periodCashWithdrawals)}</div></div>`:''}
           ${periodCapitalCashOut>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Capital Withdrawn</div><div style="font-weight:700;color:var(--red)">-${fmt(periodCapitalCashOut)}</div></div>`:''}
           <div style="display:flex;justify-content:space-between;align-items:center;border-top:1px dashed var(--border);margin-top:6px;padding-top:8px">
             <div style="font-size:0.8rem;font-weight:700">Total Cost</div>
-            <div style="font-weight:700;color:var(--red);font-family:'Instrument Serif',serif">${fmt(metrics.cash.totalCostBreakdown)}</div>
+            <div style="font-weight:700;color:var(--red);font-family:'Instrument Serif',serif">${fmt(periodTotalCost)}</div>
           </div>
         </div>
       </div>
       <div class="report-row" style="padding:9px 0">
         <div style="font-size:0.85rem;color:var(--ink2)">Net Cash Change ${rType2 === 'daily' ? 'Today' : 'In Period'}</div>
-        <div style="font-weight:700;color:${metrics.cash.netCashChange>=0?'var(--green)':'var(--red)'};font-family:'Instrument Serif',serif;font-size:1.05rem">${metrics.cash.netCashChange>=0?'+':''}${fmt(metrics.cash.netCashChange)}</div>
+        <div style="font-weight:700;color:${periodNetCashChange>=0?'var(--green)':'var(--red)'};font-family:'Instrument Serif',serif;font-size:1.05rem">${periodNetCashChange>=0?'+':''}${fmt(periodNetCashChange)}</div>
       </div>
       <div style="border-top:2px solid var(--border);margin-top:8px;padding-top:10px;display:flex;justify-content:space-between;align-items:center">
         <div style="font-size:0.85rem;font-weight:700">Cash in Hand (Expected) = (Opening + Income) - Cost</div>
         <div style="font-weight:700;font-size:1.2rem;font-family:'Instrument Serif',serif;color:${periodNetCash>=0?'var(--green)':'var(--red)'}">${fmt(periodNetCash)}</div>
       </div>
+      ${periodCashNote}
       <div style="margin-top:10px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px">
         <div style="font-size:0.8rem;font-weight:700;color:var(--ink);text-transform:uppercase;margin-bottom:8px">Total Business Value</div>
         <div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Closing Cash</div><div style="font-weight:700">${fmt(periodNetCash)}</div></div>
@@ -216,6 +266,7 @@ function renderSaleReport() {
         <div>
           <div style="font-size:0.82rem;font-weight:600">${escapeHtml(e.note)}</div>
           <div style="font-size:0.68rem;color:var(--ink2)">${e.date}</div>
+          ${txEditNote(e)}
         </div>
         <div style="display:flex;align-items:center;gap:6px">
           <span style="font-family:'Instrument Serif',serif;font-size:0.92rem;color:var(--red)">-${fmt(e.amount)}</span>
@@ -234,6 +285,7 @@ function renderSaleReport() {
         <div>
           <div style="font-size:0.82rem;font-weight:600">${escapeHtml(w.reason)}</div>
           <div style="font-size:0.68rem;color:var(--ink2)">${displayDateOnly(w.date) || w.date}</div>
+          ${txEditNote(w)}
         </div>
         <div style="display:flex;align-items:center;gap:6px">
           <span style="font-family:'Instrument Serif',serif;font-size:0.92rem;color:var(--red)">-${fmt(w.amount)}</span>
@@ -441,7 +493,7 @@ function renderPurchaseReport() {
             <span>Paid: ${fmt(paid)}</span><span>Total: ${fmt(sc.total)}</span>
           </div>
           ${payHist}
-          <button onclick="openSupplierPayModal(${sc.id})" style="margin-top:8px;padding:6px 14px;background:var(--blue);color:#fff;border:none;border-radius:8px;font-size:0.82rem;font-weight:700;cursor:pointer;font-family:'Outfit',sans-serif">💰 Pay Supplier</button>
+          <button onclick="openSupplierPayModal('${sc.id}')" style="margin-top:8px;padding:6px 14px;background:var(--blue);color:#fff;border:none;border-radius:8px;font-size:0.82rem;font-weight:700;cursor:pointer;font-family:'Outfit',sans-serif">💰 Pay Supplier</button>
         </div>`;
       },
       'rSupplierDuesList',
@@ -460,25 +512,45 @@ function renderLedgerReport() {
   const sales = metrics.sales || {};
   const business = metrics.business || {};
 
-  const investmentIn = round2(Number(cash.investmentCashIn ?? cash.capitalCashIn) || 0);
-  const loanIn = round2(Number(cash.loanCashIn) || 0);
+  // Cash for the period, and the standing position at its end, both from the
+  // database. See data/server-totals.js; the fallback rule is the same as
+  // everywhere else - this device's arithmetic, said out loud.
+  const srvCash = window.KoshTotals
+    ? KoshTotals.rowFor(rType2, rDate2, () => scheduleReportRender(0))
+    : null;
+  const srvPos = window.KoshTotals
+    ? KoshTotals.snapshotFor(rType2, rDate2, () => scheduleReportRender(0))
+    : null;
+  const pick = (src, field, local) => (src && src[field] != null)
+    ? round2(Number(src[field]))
+    : local;
+
+  const investmentIn = pick(srvCash, 'investment_in',
+                            round2(Number(cash.investmentCashIn ?? cash.capitalCashIn) || 0));
+  const loanIn = pick(srvCash, 'loan_in', round2(Number(cash.loanCashIn) || 0));
   const loanPaid = round2((data.loanPayments || []).reduce((s, p) => s + (Number(p.amount) || 0), 0));
-  const loanDue = round2((typeof getLoanFundingTxs === 'function' ? getLoanFundingTxs() : []).reduce((s, t) => s + (typeof getLoanDue === 'function' ? getLoanDue(t) : 0), 0));
-  const capitalOut = round2(Number(cash.capitalCashOut) || 0);
-  const withdrawals = round2(Number(cash.cashWithdrawalsTotal) || 0);
+  // Grouped by lender, the same way the loan page shows them, so the card and
+  // the page can never quote two different figures.
+  const loanDue = round2((typeof getLoanGroups === 'function' ? getLoanGroups() : [])
+    .reduce((t, g) => t + g.due, 0));
+  const capitalOut = pick(srvCash, 'capital_out', round2(Number(cash.capitalCashOut) || 0));
+  const withdrawals = pick(srvCash, 'withdrawal_out', round2(Number(cash.cashWithdrawalsTotal) || 0));
   const totalWithdrawal = round2(capitalOut + withdrawals);
-  const openingCash = round2(Number(cash.openingCash) || 0);
+  const openingCash = pick(srvCash, 'opening_cash', round2(Number(cash.openingCash) || 0));
   const businessCapital = round2(openingCash + investmentIn - totalWithdrawal);
-  const businessWorth = round2(Number(business.netBusinessWorth) || 0);
-  const customerCredit = round2(Number(business.customerDueAll) || 0);
-  const supplierCredit = round2(Number(business.supplierDueAll) || 0);
+  const businessWorth = pick(srvPos, 'business_worth', round2(Number(business.netBusinessWorth) || 0));
+  const customerCredit = pick(srvPos, 'receivable', round2(Number(business.customerDueAll) || 0));
+  const supplierCredit = pick(srvPos, 'payable', round2(Number(business.supplierDueAll) || 0));
   const netCreditPosition = round2(customerCredit - supplierCredit);
-  const extraExpense = round2(Number(cash.extraExpensesTotal) || 0);
-  const damageLoss = round2(Number(sales.adjustmentLoss) || 0);
-  const totalProfit = round2(Number(sales.profit) || 0);
+  const extraExpense = pick(srvCash, 'expense_out', round2(Number(cash.extraExpensesTotal) || 0));
+  const srvEarned = window.KoshTotals
+    ? KoshTotals.profitFor(rType2, rDate2, () => scheduleReportRender(0))
+    : null;
+  const damageLoss = pick(srvEarned, 'adjustment_loss', round2(Number(sales.adjustmentLoss) || 0));
+  const totalProfit = pick(srvEarned, 'profit', round2(Number(sales.profit) || 0));
   const netProfitLoss = round2(totalProfit - extraExpense);
-  const stockValue = round2(Number(business.stockValue) || 0);
-  const cashInHand = round2(Number(cash.closingCash) || 0);
+  const stockValue = pick(srvPos, 'stock_value', round2(Number(business.stockValue) || 0));
+  const cashInHand = pick(srvCash, 'cash_in_hand', round2(Number(cash.closingCash) || 0));
 
   const stat = (label, value, color = 'gold', sub = '') =>
     `<div class="stat"><div class="stat-label">${label}</div><div class="stat-value ${color}">${fmt(value)}</div>${sub ? `<div class="stat-sub">${sub}</div>` : ''}</div>`;

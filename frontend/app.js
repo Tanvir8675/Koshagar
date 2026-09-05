@@ -23,11 +23,14 @@
     console.log('Initializing app...');
     await withTimeout(() => initDB(), 8000, 'Database initialization');
     console.log('DB initialized, db object:', !!db);
-    if(window.KoshDB) {
-      const sqlOk = await withTimeout(() => KoshDB.init(), 20000, 'SQLite initialization');
-      if(sqlOk) console.log('Relational SQLite ready — schema v', KoshDB.schemaVersion);
-      else console.warn('SQLite unavailable — JSON backup mode only:', KoshDB.lastError);
-    }
+    // SQLite is not started. It was the app's database when the books lived in
+    // the browser; the books live in Postgres now, and a second database that
+    // still opens is a second answer waiting to be believed. What the device
+    // keeps instead is a read-only copy of the last load - see cacheSnapshot().
+    //
+    // db/sqlite.js is still on the page for the reliability report to name what
+    // it finds, and for an offline build to start deliberately. Nothing in the
+    // running app reads it.
     const rememberedUser = normalizeUserId(storageGet('local', AUTH_KEYS.lastUser) || '');
     await withTimeout(() => loadUserPin(rememberedUser), 8000, 'PIN load');
     console.log('User PIN loaded, userPin:', !!userPin);
@@ -94,23 +97,11 @@
         if(event.key === 'Enter') resetSystem();
       });
     }
-    const deleteByDateBtn = document.getElementById('deleteByDateBtn');
-    if(deleteByDateBtn) deleteByDateBtn.addEventListener('click', () => {
-      closeSettings();
-      openDeleteByDateModal();
-    });
-    const deleteByDateConfirmBtn = document.getElementById('deleteByDateConfirmBtn');
-    if(deleteByDateConfirmBtn) deleteByDateConfirmBtn.addEventListener('click', deleteTransactionsByDate);
-    const deleteByDateCancelBtn = document.getElementById('deleteByDateCancelBtn');
-    if(deleteByDateCancelBtn) deleteByDateCancelBtn.addEventListener('click', closeDeleteByDateModal);
-    const deletePinInput = document.getElementById('deletePinInput');
-    if(deletePinInput) {
-      deletePinInput.addEventListener('keypress', (event) => {
-        if(event.key === 'Enter') deleteTransactionsByDate();
-      });
-    }
     setupNavSyncBindings();
     applyLanguage();
+    // Every password box, including the ones inside panels that are hidden at
+    // startup - they are in the DOM, just not displayed.
+    if(typeof attachPasswordToggles === 'function') attachPasswordToggles();
     syncAuthAutofillIsolation();
     ensureActionButtonsNotSubmit();
 
@@ -119,13 +110,43 @@
     document.getElementById('settingsOverlay').classList.remove('active');
     document.getElementById('settingsPanel').style.display = 'none';
 
+    // Did we arrive from a link in an email? Confirmation and password-reset
+    // links both come back with the session in the URL fragment, so this has to
+    // run before anything else decides which screen to show.
+    let fromLink = null;
+    try { fromLink = KoshAuth.sessionFromUrl(); } catch (e) { console.warn('Link handling failed:', e); }
+
+    // A live Supabase session outranks anything local: the server is the source
+    // of truth, so if the token is still good we go straight in rather than
+    // asking for a password the account no longer uses. A recovery link is the
+    // exception - it carries a session, but the app must stay shut until a new
+    // password is set.
+    let serverSession = null;
+    if (!fromLink?.isRecovery) {
+      try {
+        serverSession = await KoshAuth.refreshIfNeeded(KoshAuth.restore());
+      } catch (e) {
+        console.warn('Session restore failed:', e);
+      }
+    }
     // Restore active session on refresh (same window/tab), otherwise show auth screen
     const registeredUsers = getRegisteredUsers();
-    if(registeredUsers.length === 0) {
+    if (fromLink?.isRecovery) {
+      // The reason this link was clicked is that signing in did not work, so the
+      // books stay closed until the new password is actually chosen.
+      console.log('Arrived from a password-reset link');
+      document.body.classList.remove('auth-booting');
+      showAuthPage('loginPage');
+      showAuthTab('reset');
+      setTimeout(() => document.getElementById('npNew')?.focus(), 0);
+    } else if (serverSession) {
+      console.log('Server session restored, entering app');
+      currentRole = 'owner';
+      document.body.classList.remove('auth-booting');
+      await enterApp();
+    } else if(registeredUsers.length === 0) {
       console.log('No local account found, showing login page (cloud login supported)');
       document.getElementById('loginPage').style.display = 'flex';
-      document.getElementById('setupPage').style.display = 'none';
-      document.getElementById('resetPage').style.display = 'none';
       setSessionActive(false);
       setAuthInteractionEnabled(true);
       document.body.classList.remove('auth-booting');
@@ -138,8 +159,6 @@
         ensureActionButtonsNotSubmit();
         closeAllTransientOverlays();
         document.getElementById('loginPage').style.display = 'none';
-        document.getElementById('setupPage').style.display = 'none';
-        document.getElementById('resetPage').style.display = 'none';
         document.querySelector('.bottom-nav').style.display = 'flex';
         document.body.classList.remove('auth-booting');
         showPage('dashboard');
@@ -147,8 +166,6 @@
         console.log('PIN found, showing login page');
         isLoggedIn = false;
         document.getElementById('loginPage').style.display = 'flex';
-        document.getElementById('setupPage').style.display = 'none';
-        document.getElementById('resetPage').style.display = 'none';
         setAuthInteractionEnabled(true);
         document.body.classList.remove('auth-booting');
         setTimeout(() => document.getElementById('loginPin')?.focus(), 0);
@@ -160,6 +177,10 @@
     // the `inert` attribute off the shown login page — otherwise it stays frozen
     // and credentials can't be typed/submitted until a manual refresh.
     syncAuthAutofillIsolation();
+
+    // An expired or already-used link should say so, rather than dropping the
+    // person at a login screen with no explanation for why they are there.
+    if (fromLink?.error && typeof authSay === 'function') authSay(fromLink.error);
 
     // Check for date changes every minute and auto-refresh dashboard
     setInterval(checkDateChange, 60000);
@@ -201,14 +222,10 @@ setTimeout(() => {
     console.warn('Boot watchdog triggered: forcing auth fallback screen');
     const hasPin = true;
     if(typeof showAuthPage === 'function') {
-      showAuthPage(hasPin ? 'loginPage' : 'setupPage');
+      showAuthPage('loginPage');
     } else {
       const loginPage = document.getElementById('loginPage');
-      const setupPage = document.getElementById('setupPage');
-      const resetPage = document.getElementById('resetPage');
       if(loginPage) loginPage.style.display = hasPin ? 'flex' : 'none';
-      if(setupPage) setupPage.style.display = hasPin ? 'none' : 'flex';
-      if(resetPage) resetPage.style.display = 'none';
     }
     const nav = document.querySelector('.bottom-nav');
     if(nav) nav.style.display = 'none';

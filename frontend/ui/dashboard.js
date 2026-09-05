@@ -19,47 +19,103 @@ function renderDashboard(keepPaging = false) {
   const ops = calc.ops;
   document.getElementById('dashDate').textContent = displayDateOnly(new Date());
   const dashAgg = ops.dashboardAggregates;
-  const grossRev    = metrics.sales.grossRevenue;
-  const returnTotal = metrics.sales.returnRevenue;
-  const rev         = metrics.sales.netRevenue;
-  const profit      = metrics.sales.profit;
+  // Revenue and profit from the database, on the same terms as the cash card:
+  // the server's answer when there is one, this device's when there is not.
+  const srvEarned = window.KoshTotals ? KoshTotals.profitOn(now) : null;
+  const pickEarned = (field, local) => (srvEarned && srvEarned[field] != null)
+    ? Math.round(Number(srvEarned[field]) * 100) / 100
+    : local;
+  const grossRev    = pickEarned('gross_revenue', metrics.sales.grossRevenue);
+  const billDiscount = pickEarned('bill_discount', metrics.sales.billDiscount || 0);
+  const returnTotal = pickEarned('sale_return_revenue', metrics.sales.returnRevenue);
+  const rev         = pickEarned('net_revenue', metrics.sales.netRevenue);
+  const profit      = pickEarned('profit', metrics.sales.profit);
   const pSpend      = metrics.dashboard.purchaseCashOut;
   const pDue        = metrics.dashboard.supplierDueOpen;
   const low   = ops.lowStockCount;
   const out   = ops.outStockCount;
 
+  // WHERE THE CASH FIGURES COME FROM
+  //
+  // The database, via cash_summary() - see data/server-totals.js. It reads
+  // cash_ledger, the table that records money actually moving, so the drawer is
+  // explained by the rows that changed it rather than by re-deriving it here
+  // from the whole book held in memory.
+  //
+  // `pick` takes the server's answer when there is one. When there is none -
+  // offline, or the migration not run yet - it falls back to this device's own
+  // arithmetic, and the card says so; see serverCashNote below. The fallback is
+  // announced on purpose: an unannounced one is a second source of truth.
+  const srvCash = window.KoshTotals ? KoshTotals.row(now) : null;
+  const pick = (field, local) => (srvCash && srvCash[field] != null)
+    ? Math.round(Number(srvCash[field]) * 100) / 100
+    : local;
+
   // Cash vs credit breakdown for today
   const todayCreditSalesDue = metrics.sales.creditDueInPeriod;
-  const saleCashIn = metrics.sales.saleCashIn;
-  const saleReturnCashOut = metrics.sales.saleReturnCashOut;
-  const paymentsReceivedToday = metrics.cash.periodPaymentsReceived;
-  const purchaseReturnCashIn = metrics.cash.purchaseReturnCashIn;
-  const purchaseCashPaid = metrics.purchase.cashPaidAtBuy;
-  const purchaseExtraCostCashOut = metrics.purchase.extraCostCashOut || 0;
-  const supplierDuePaidCashOut = metrics.purchase.supplierDuePaidCashOut;
-  const openingCash = metrics.cash.openingCash;
-  const capitalCashIn = metrics.cash.capitalCashIn || 0;
-  const investmentCashIn = metrics.cash.investmentCashIn || 0;
-  const loanCashIn = metrics.cash.loanCashIn || 0;
-  const cashInToday = metrics.cash.cashIn;
-  const cashOutToday = metrics.cash.cashOut;
-  const totalInWithOpening = metrics.cash.totalInWithOpening;
-  const totalCashInHand = metrics.cash.closingCash;
-  const netCashChange = metrics.cash.netCashChange;
-  const extraExpensesToday = metrics.cash.extraExpensesTotal || 0;
+  const saleCashIn = pick('sale_cash_in', metrics.sales.saleCashIn);
+  const saleReturnCashOut = pick('sale_return_out', metrics.sales.saleReturnCashOut);
+  const paymentsReceivedToday = pick('customer_payment_in', metrics.cash.periodPaymentsReceived);
+  const purchaseReturnCashIn = pick('purchase_return_in', metrics.cash.purchaseReturnCashIn);
+  const purchaseCashPaid = pick('purchase_goods_out', metrics.purchase.cashPaidAtBuy);
+  const purchaseExtraCostCashOut = pick('purchase_extra_out', metrics.purchase.extraCostCashOut || 0);
+  const supplierDuePaidCashOut = pick('supplier_payment_out', metrics.purchase.supplierDuePaidCashOut);
+  const openingCash = pick('opening_cash', metrics.cash.openingCash);
+  const capitalCashIn = pick('investment_in', metrics.cash.capitalCashIn || 0);
+  const investmentCashIn = pick('investment_in', metrics.cash.investmentCashIn || 0);
+  const loanCashIn = pick('loan_in', metrics.cash.loanCashIn || 0);
+  const cashInToday = pick('total_in', metrics.cash.cashIn);
+  const cashOutToday = pick('total_out', metrics.cash.cashOut);
+  const totalInWithOpening = pick('total_in_with_opening', metrics.cash.totalInWithOpening);
+  const totalCashInHand = pick('cash_in_hand', metrics.cash.closingCash);
+  const netCashChange = pick('net_cash_change', metrics.cash.netCashChange);
+  const extraExpensesToday = pick('expense_out', metrics.cash.extraExpensesTotal || 0);
   const extraExpensesListToday = metrics.cash.extraExpensesList || [];
   const withdrawalsListToday = metrics.cash.cashWithdrawalsList || [];
   // Both of these are already subtracted inside cashOut/closingCash. They must be
   // shown as their own Cash Out rows too, or the itemised rows don't add up to
   // "Total Out" and the money looks like it vanished.
-  const cashWithdrawalsToday = metrics.cash.cashWithdrawalsTotal || 0;
-  const capitalCashOutToday = metrics.cash.capitalCashOut || 0;
-  const loanPaymentCashOut = metrics.cash.loanPaymentCashOut || 0;
+  const cashWithdrawalsToday = pick('withdrawal_out', metrics.cash.cashWithdrawalsTotal || 0);
+  const capitalCashOutToday = pick('capital_out', metrics.cash.capitalCashOut || 0);
+  const loanPaymentCashOut = pick('loan_payment_out', metrics.cash.loanPaymentCashOut || 0);
   const capitalRowsToday = (calc.snap?.capitalInRaw || []).slice().sort((a,b)=>new Date(b.date)-new Date(a.date));
+
+  // WHAT THE CARD ADMITS ABOUT ITSELF
+  //
+  // Two things are worth saying out loud, and nothing else:
+  //
+  //   * the database did not answer, so these are this device's own figures.
+  //     Silence here would let a stale or locally-derived drawer pass as the
+  //     book's.
+  //   * the database answered and this device's arithmetic disagrees with it.
+  //     The figures shown are the database's; the disagreement still matters,
+  //     because one of the two calculators has a bug and it is worth finding
+  //     before the second one is deleted.
+  //
+  // When the two agree, nothing is shown. A tick on every screen for a check
+  // that passes every time is noise, and noise is not read.
+  const cashCheck = window.KoshTotals ? KoshTotals.lastCompare() : null;
+  const cashDiffs = (cashCheck && cashCheck.date === now) ? (cashCheck.diffs || []) : [];
+  const localCashInHand = Math.round((Number(metrics.cash.closingCash) || 0) * 100) / 100;
+  const serverCashNote = !srvCash ? `
+      <div style="margin-top:8px;padding:8px 10px;border:1px solid var(--border);border-radius:9px;background:var(--surface)">
+        <div style="font-size:0.72rem;color:var(--ink2)">
+          \ud83d\udcf6 The server was not asked for these figures, so they are worked out on this
+          device. They will be checked against the books on the next connection.
+        </div>
+      </div>` : (cashDiffs.length ? `
+      <div style="margin-top:8px;padding:8px 10px;border:1px solid var(--gold);border-radius:9px;background:rgba(200,150,20,0.07)">
+        <div style="font-size:0.74rem;font-weight:700;color:var(--ink)">\u26a0\ufe0f This device works out a different total</div>
+        <div style="font-size:0.72rem;color:var(--ink2);margin-top:3px">
+          Shown above is what the database says. This device makes cash in hand
+          <b>${fmt(localCashInHand)}</b> from ${cashDiffs.length} differing line${cashDiffs.length > 1 ? 's' : ''}.
+          Open the browser console for the breakdown.
+        </div>
+      </div>` : '');
   const t = i18nText;
 
   document.getElementById('dashStats').innerHTML = `
-    <div class="stat"><div class="stat-label">${t('todayRevenue')}</div><div class="stat-value ${rev>=0?'gold':'red'}">${fmt(rev)}</div><div class="stat-sub">Gross ${fmt(grossRev)} − Return ${fmt(returnTotal)} = Net ${fmt(rev)}</div></div>
+    <div class="stat"><div class="stat-label">${t('todayRevenue')}</div><div class="stat-value ${rev>=0?'gold':'red'}">${fmt(rev)}</div><div class="stat-sub">Gross ${fmt(grossRev)}${billDiscount>0?' − Discount '+fmt(billDiscount):''} − Return ${fmt(returnTotal)} = Net ${fmt(rev)}</div></div>
     <div class="stat"><div class="stat-label">${t('todayProfit')}</div><div class="stat-value ${profit>=0?'green':'red'}">${fmt(profit)}</div>${returnTotal>0&&grossRev===0?`<div class="stat-sub" style="color:var(--red)">No sales today</div>`:''}</div>
     <div class="stat"><div class="stat-label">${t('purchasedCash')}</div><div class="stat-value blue">${fmt(pSpend)}</div>${pDue>0?`<div class="stat-sub" style="color:var(--red)">Supplier due: ${fmt(pDue)}</div>`:`<div class="stat-sub">Fully paid</div>`}</div>
     <div class="stat" style="cursor:pointer" onclick="showStockAlerts()"><div class="stat-label">${t('stockAlerts')}</div><div class="stat-value ${(low+out)>0?'red':'green'}">${low+out}</div><div class="stat-sub">${low} low · ${out} out</div></div>`;
@@ -94,11 +150,11 @@ function renderDashboard(keepPaging = false) {
         </div>
         <div style="background:var(--blue-light);border:1px solid var(--border);border-radius:10px;padding:10px">
           <div style="font-size:0.72rem;font-weight:700;color:var(--blue);text-transform:uppercase;margin-bottom:6px">${t('cashOut')}</div>
-          <div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Purchase Paid (Cash)</div><div style="font-weight:700;color:var(--blue)">-${fmt(purchaseCashPaid)}</div></div>
+          <div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Purchase Paid (Cash)</div><div style="font-weight:700;color:var(--red)">-${fmt(purchaseCashPaid)}</div></div>
           ${purchaseExtraCostCashOut>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Purchase Extra Costing</div><div style="font-weight:700;color:var(--red)">-${fmt(purchaseExtraCostCashOut)}</div></div>`:''}
           ${saleReturnCashOut>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Sale Return Refund</div><div style="font-weight:700;color:var(--red)">-${fmt(saleReturnCashOut)}</div></div>`:''}
-          ${supplierDuePaidCashOut>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Supplier Due Paid</div><div style="font-weight:700;color:var(--blue)">-${fmt(supplierDuePaidCashOut)}</div></div>`:''}
-          ${loanPaymentCashOut>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Loan Payment</div><div style="font-weight:700;color:var(--blue)">-${fmt(loanPaymentCashOut)}</div></div>`:''}
+          ${supplierDuePaidCashOut>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Supplier Due Paid</div><div style="font-weight:700;color:var(--red)">-${fmt(supplierDuePaidCashOut)}</div></div>`:''}
+          ${loanPaymentCashOut>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Loan Payment</div><div style="font-weight:700;color:var(--red)">-${fmt(loanPaymentCashOut)}</div></div>`:''}
           ${extraExpensesToday>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Extra Expenses</div><div style="font-weight:700;color:var(--red)">-${fmt(extraExpensesToday)}</div></div>`:''}
           ${cashWithdrawalsToday>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Owner Withdrawal</div><div style="font-weight:700;color:var(--red)">-${fmt(cashWithdrawalsToday)}</div></div>`:''}
           ${capitalCashOutToday>0?`<div class="report-row" style="padding:7px 0"><div style="font-size:0.8rem;color:var(--ink2)">Capital Withdrawn</div><div style="font-weight:700;color:var(--red)">-${fmt(capitalCashOutToday)}</div></div>`:''}
@@ -124,6 +180,7 @@ function renderDashboard(keepPaging = false) {
         <div style="font-size:0.85rem;font-weight:700">Cash in Hand (Expected) = (Opening + In) - Out</div>
         <div style="font-weight:700;font-size:1.2rem;font-family:'Instrument Serif',serif;color:${totalCashInHand>=0?'var(--green)':'var(--red)'}">${fmt(totalCashInHand)}</div>
       </div>
+      ${serverCashNote}
       <div style="border-top:1.5px dashed var(--border);margin-top:14px;padding-top:12px">
         <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--ink2);margin-bottom:8px">☕ Daily Extra Expenses</div>
         <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap">
@@ -158,6 +215,7 @@ function renderDashboard(keepPaging = false) {
           <div>
             <div style="font-size:0.82rem;font-weight:600">${escapeHtml(e.note)}</div>
             <div style="font-size:0.68rem;color:var(--ink2)">${displayDateOnly(e.date) || e.date}</div>
+            ${txEditNote(e)}
           </div>
           <div style="display:flex;align-items:center;gap:6px">
             <span style="font-family:'Instrument Serif',serif;font-size:0.95rem;color:var(--red)">-${fmt(e.amount)}</span>
@@ -176,6 +234,7 @@ function renderDashboard(keepPaging = false) {
           <div>
             <div style="font-size:0.82rem;font-weight:600">${escapeHtml(w.reason)}</div>
             <div style="font-size:0.68rem;color:var(--ink2)">${displayDateOnly(w.date) || w.date}</div>
+            ${txEditNote(w)}
           </div>
           <div style="display:flex;align-items:center;gap:6px">
             <span style="font-family:'Instrument Serif',serif;font-size:0.95rem;color:var(--red)">-${fmt(w.amount)}</span>

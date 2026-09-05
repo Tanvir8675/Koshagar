@@ -16,7 +16,14 @@
 //   node tools/import-to-supabase.mjs --file "C:\...\shop-RECOVERED-CLOUD-FULL...json"
 //
 //   --shop-id <uuid>   import into an existing shop instead of creating one
+//   --owner <email|uuid>  make this account the owner of a NEWLY created shop
 //   --dry-run          analyse and report, write nothing
+//
+// A shop created here is NOT created by handle_new_user(), so nothing gives the
+// account a membership of it - and RLS shows a signed-in user only the shops in
+// their own shop_members rows. Without --owner the import lands in a shop the
+// app can never open. Import into your existing shop (--shop-id) or name the
+// owner; there is no third option that ends with the data on screen.
 //
 // The SERVICE ROLE key is required because only it can create legacy parties
 // (those without a phone). Never put this key in the frontend.
@@ -29,6 +36,7 @@ const args = process.argv.slice(2);
 const argOf = (n) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : null; };
 const DRY = args.includes('--dry-run');
 const FILE = argOf('--file');
+const OWNER = argOf('--owner');
 let SHOP = argOf('--shop-id');
 
 if (!FILE) fail('--file is required');
@@ -66,6 +74,21 @@ const insert = (table, rows) =>
 const select = (table, query) => api(`/${table}?${query}`);
 const rpc = (fn, payload) =>
   api(`/rpc/${fn}`, { method: 'POST', body: payload });
+
+// auth.users is not reachable through PostgREST, so an email is resolved with
+// the admin API instead. A uuid is taken as given.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+async function resolveOwner(who) {
+  if (UUID.test(who)) return who;
+  const res = await fetch(`${URL_BASE}/auth/v1/admin/users?per_page=200`, {
+    headers: { apikey: KEY, Authorization: `Bearer ${KEY}` }
+  });
+  if (!res.ok) fail(`could not look up "${who}": ${res.status} ${await res.text()}`);
+  const { users = [] } = await res.json();
+  const hit = users.find((u) => String(u.email || '').toLowerCase() === who.toLowerCase());
+  if (!hit) fail(`no account with the email "${who}". Sign up in the app first, then re-run.`);
+  return hit.id;
+}
 
 // ---------------------------------------------------------------------------
 // Load and shape the source data
@@ -108,11 +131,26 @@ if (DRY) {
 // 1. Shop
 // ---------------------------------------------------------------------------
 if (!SHOP) {
+  if (!OWNER) {
+    fail('--owner <email|uuid> is required when creating a shop, or the imported ' +
+         'shop will belong to nobody and cannot be opened in the app. ' +
+         'Use --shop-id to import into a shop you already own.');
+  }
+  const ownerId = await resolveOwner(OWNER);
   const [shop] = await insert('shops', [{ name: norm(data.shopName) || 'KoshAgar' }]);
   SHOP = shop.id;
-  console.log(`Created shop ${SHOP}`);
+  // The membership IS the access. handle_new_user() writes one for a shop it
+  // creates at signup; an insert from here does not fire that trigger, so it is
+  // written explicitly - otherwise current_shop_ids() returns nothing for this
+  // shop and every screen in the app comes back empty.
+  await insert('shop_members', [{ shop_id: SHOP, user_id: ownerId, role: 'owner' }]);
+  console.log(`Created shop ${SHOP}, owned by ${OWNER}`);
 } else {
   console.log(`Importing into existing shop ${SHOP}`);
+  const members = await select('shop_members', `shop_id=eq.${SHOP}&select=user_id,role`);
+  if (!members.length) {
+    console.log('  WARNING: this shop has no members - nobody can open it in the app.');
+  }
 }
 
 // A shop created by an ordinary insert does NOT go through handle_new_user() -
@@ -301,6 +339,15 @@ function lineFor(t) {
   };
 }
 
+// HISTORY IS REPLAYED, NOT RE-JUDGED.
+//
+// 45-49 gave purchases, expenses, payments out, capital withdrawal and cash
+// refunds the same insufficient-cash refusal withdrawals have always had. The
+// old app had no such rule, so the real books contain days where the drawer
+// went below zero - and those days must import exactly as they stand. 50 gives
+// all five the allow_negative flag 23 gave withdrawals; it is honoured only for
+// service_role, so the guard stays fully in force for anyone typing into the
+// app.
 for (const [key, lines] of ordered) {
   const head = lines[0];
   const type = head.type;
@@ -310,7 +357,12 @@ for (const [key, lines] of ordered) {
   try {
     if (type === 'capital-in' || type === 'capital-out') {
       for (const l of lines) {
+        // financial.js line 112 filters these out: capitalInRaw excludes
+        // t.seedOpening. They are the money the opening-cash figure already
+        // stands for, so posting them would count it twice.
+        if (l.seedOpening) { skipped++; continue; }
         await rpc('post_capital_movement', { p_shop: SHOP, p_payload: {
+          allow_negative: true,
           idempotency_key: `import:capital:${l.id}`,
           business_date: date, occurred_at: l.date,
           kind: type === 'capital-in' ? 'in' : 'out',
@@ -336,6 +388,7 @@ for (const [key, lines] of ordered) {
         const origLine = lineIdCache.get(origId);
         if (!origLine) { skipped++; failures.push({ key, why: `return ${l.id} has no resolvable original line (${origId})` }); continue; }
         await rpc('post_return', { p_shop: SHOP, p_payload: {
+          allow_negative: true,
           idempotency_key: `import:ret:${l.id}`,
           business_date: date, occurred_at: l.date,
           kind: l.returnType === 'purchase-return' ? 'purchase_return' : 'sale_return',
@@ -381,13 +434,26 @@ for (const [key, lines] of ordered) {
       //
       // The credit record is still used, but only for WHO the party is: that is
       // what fixed the supplier payable mapping.
-      let cash = paid;
-      if (cash > net + 0.001) {
-        overpaid.push({ key, date, type, recorded: cash, bill: net });
-        cash = net;
+      // Freight and labour on a purchase. Every line carries its OWN share in
+      // both lineExtraCost and invoiceExtraCost - the second name is misleading,
+      // it is not the document total - so the document figure is the sum. Taking
+      // head.invoiceExtraCost read only the first line's share and lost the rest.
+      const extraCost = type === 'purchase'
+        ? Math.round(lines.reduce((s, l) =>
+            s + Number(l.lineExtraCost ?? l.invoiceExtraCost ?? 0), 0) * 100) / 100
+        : 0;
+      // financial.js line 152 subtracts extra cost as cash out unconditionally:
+      // carrying and unloading are paid at the gate, not put on the supplier's
+      // account. So it is added to the cash rather than left sitting as a debt.
+      const payable = Math.round((net + extraCost) * 100) / 100;
+
+      let cash = Math.round((paid + extraCost) * 100) / 100;
+      if (cash > payable + 0.001) {
+        overpaid.push({ key, date, type, recorded: cash, bill: payable });
+        cash = payable;
       }
-      cash = Math.min(cash, net);
-      const stillOwed = net - cash;
+      cash = Math.min(cash, payable);
+      const stillOwed = Math.round((payable - cash) * 100) / 100;
 
       let partyFinal = party;
       if (stillOwed > 0.01 && !partyFinal) {
@@ -414,7 +480,10 @@ for (const [key, lines] of ordered) {
         note: norm(head.reason),
         lines: lines.map(lineFor)
       };
-      if (type === 'purchase') payload.extra_cost = Number(head.invoiceExtraCost || 0);
+      if (type === 'purchase') {
+        payload.extra_cost = extraCost;
+        payload.allow_negative = true;
+      }
 
       const res = await rpc(type === 'sale' ? 'post_sale' : 'post_purchase', { p_shop: SHOP, p_payload: payload });
       const docId = res.sale_id || res.purchase_id;
@@ -448,79 +517,43 @@ const byDate = (a, b) => String(a.date).localeCompare(String(b.date));
 for (const e of [...(data.extraExpenses || [])].sort(byDate)) {
   try {
     await rpc('post_expense', { p_shop: SHOP, p_payload: {
+      allow_negative: true,
       idempotency_key: `import:exp:${e.id}`,
       business_date: String(e.date).slice(0, 10), occurred_at: e.date,
       amount: Number(e.amount), note: norm(e.note)
     }});
   } catch (err) { failures.push({ key: `expense:${e.id}`, why: err.message }); }
 }
-// The owner confirmed these withdrawals really happened, so where the drawer
-// cannot cover one the missing half is cash income that was never written down.
-// A cash adjustment records exactly that gap, with a reason, before retrying -
-// so the money is accounted for rather than quietly absorbed.
-const shortfalls = [];
+// The old app let the drawer go negative, and some real withdrawals in the
+// books are larger than the cash recorded that day. History is the fact, so it
+// is imported exactly as it stands: allow_negative tells the database to skip
+// the insufficient-cash guard for this replay only. The guard stays fully in
+// force for anyone entering a withdrawal in the app.
 for (const w of [...(data.cashWithdrawals || [])].sort(byDate)) {
-  const date = String(w.date).slice(0, 10);
-  const payload = {
-    idempotency_key: `import:wd:${w.id}`,
-    business_date: date, occurred_at: w.date,
-    amount: Number(w.amount), reason: norm(w.reason)
-  };
   try {
-    await rpc('post_cash_withdrawal', { p_shop: SHOP, p_payload: payload });
-  } catch (err) {
-    const m = /INSUFFICIENT_CASH: the drawer holds (-?[\d.]+)/.exec(err.message);
-    if (!m) { failures.push({ key: `withdrawal:${w.id}`, why: err.message }); continue; }
-    const held = Number(m[1]);
-    const gap = Math.round((Number(w.amount) - held) * 100) / 100;
-    try {
-      await rpc('post_cash_adjustment', { p_shop: SHOP, p_payload: {
-        idempotency_key: `import:cashadj:${w.id}`,
-        business_date: date, occurred_at: w.date,
-        direction: 'in', amount: gap,
-        reason: `Unrecorded cash income before migration - drawer was short ${gap.toFixed(2)} for withdrawal on ${date}`
-      }});
-      await rpc('post_cash_withdrawal', { p_shop: SHOP, p_payload: payload });
-      shortfalls.push({ date, gap, withdrawal: Number(w.amount) });
-    } catch (err2) { failures.push({ key: `withdrawal:${w.id}`, why: err2.message }); }
-  }
-}
-if (shortfalls.length) {
-  const total = shortfalls.reduce((s, x) => s + x.gap, 0);
-  console.log(`
-${shortfalls.length} day(s) where the drawer could not cover a real withdrawal:`);
-  for (const x of shortfalls) console.log(`  ${x.date}  short ${money(x.gap)} on a withdrawal of ${money(x.withdrawal)}`);
-  console.log(`  total recorded as unrecorded cash income: ${money(total)}`);
+    await rpc('post_cash_withdrawal', { p_shop: SHOP, p_payload: {
+      idempotency_key: `import:wd:${w.id}`,
+      business_date: String(w.date).slice(0, 10), occurred_at: w.date,
+      amount: Number(w.amount), reason: norm(w.reason),
+      allow_negative: true
+    }});
+  } catch (err) { failures.push({ key: `withdrawal:${w.id}`, why: err.message }); }
 }
 console.log(`Expenses: ${(data.extraExpenses || []).length}, withdrawals: ${(data.cashWithdrawals || []).length}`);
 
 // ---------------------------------------------------------------------------
-// 7b. The initial payment held on each credit row.
+// NOT imported: credits.paid / supplierCredits.paid
 //
-// The old model stored a first payment directly on the credit ("paid"), with
-// later payments in a separate table. Only the latter were being imported, so
-// every credit looked more outstanding than it was.
+// That figure is the cash taken at the counter, and it is ALREADY on the sale
+// or purchase line as cashPaid - identical on all 38 credits that carry one.
+// Recording it again as a payment booked the same money twice (BDT 46,605) and
+// wrongly settled bills it had already been counted against.
+//
+// The app agrees: netCashDelta in calc/financial.js counts
+// periodPaymentsReceived, which is the payments array only. The outstanding
+// bill is total - paid, which is exactly what post_sale derives from
+// net - cash_paid.
 // ---------------------------------------------------------------------------
-let initialPays = 0;
-for (const [list, dir] of [[data.credits, 'in'], [data.supplierCredits, 'out']]) {
-  for (const c of list || []) {
-    const amt = Number(c.paid || 0);
-    if (amt <= 0) continue;
-    const name = norm(c.customerName || c.supplierName);
-    const phone = norm(c.customerPhone || c.supplierPhone);
-    const party = partyId.get(PHONE.test(phone) ? `p:${phone}` : `n:${name.toLowerCase()}`);
-    if (!party) { failures.push({ key: `initial:${c.id}`, why: 'no party for initial payment' }); continue; }
-    try {
-      await rpc('record_payment', { p_shop: SHOP, p_payload: {
-        idempotency_key: `import:init:${dir}:${c.id}`,
-        business_date: String(c.date).slice(0, 10), occurred_at: c.date,
-        party_id: party, direction: dir, amount: amt
-      }});
-      initialPays++;
-    } catch (err) { failures.push({ key: `initial:${c.id}`, why: err.message }); }
-  }
-}
-console.log(`Initial payments held on credit rows: ${initialPays}`);
 
 // ---------------------------------------------------------------------------
 // 8. Payments against credit. Allocation is done by record_payment,
@@ -553,6 +586,7 @@ for (const p of data.supplierPayments || []) {
   if (!party) { failures.push({ key: `spayment:${p.id}`, why: 'no party' }); continue; }
   try {
     await rpc('record_payment', { p_shop: SHOP, p_payload: {
+      allow_negative: true,
       idempotency_key: `import:spay:${p.id}`,
       business_date: String(p.date).slice(0, 10), occurred_at: p.date,
       party_id: party, direction: 'out', amount: Number(p.amount)

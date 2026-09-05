@@ -25,72 +25,26 @@ function returnCostTotal(t) {
   return round2(getReturnCost(t) * (Number(t && t.qty) || 0));
 }
 
-KoshCalc._loadPeriodTransactionsFromSqlite = function(periodType, periodDate) {
-  try {
-    if(!window.KoshDB || !KoshDB.available || !KoshDB.hasBusinessData()) return null;
-    const badDate = KoshDB.query("SELECT COUNT(*) FROM transactions WHERE local_date IS NULL OR local_date NOT GLOB '????-??-??'");
-    const badDateCount = badDate && badDate[0] && badDate[0].values && badDate[0].values[0] ? Number(badDate[0].values[0][0]) || 0 : 0;
-    if(badDateCount > 0) return null;
-
-    let startYmd = getPeriodStartDate(periodType, periodDate);
-    let endYmd = typeof getPeriodEndDate === 'function' ? getPeriodEndDate(periodType, periodDate) : (periodDate || todayStr());
-    if(!startYmd || !endYmd) return null;
-    if(startYmd > endYmd) { const tmp = startYmd; startYmd = endYmd; endYmd = tmp; }
-
-    const res = KoshDB.query(
-      `SELECT json FROM transactions
-       WHERE local_date >= ? AND local_date <= ?
-         AND type IN ('sale','purchase','return','adjustment','capital-in','capital-out')
-       ORDER BY local_date ASC, id ASC`,
-      [startYmd, endYmd]
-    );
-    if(!res || !res[0]) return [];
-    const out = [];
-    for(const row of res[0].values || []) {
-      try { out.push(JSON.parse(row[0])); } catch(_) {}
-    }
-    return out;
-  } catch(_) {
-    return null;
-  }
+// The transactions themselves, and the same rule: they come from the server or
+// they do not come at all. See _loadPeriodJsonRowsFromSqlite below.
+KoshCalc._loadPeriodTransactionsFromSqlite = function() {
+  return null;
 };
 
-KoshCalc._loadPeriodJsonRowsFromSqlite = function(table, periodType, periodDate) {
-  const allowed = {
-    credits: true,
-    payments: true,
-    supplier_credits: true,
-    supplier_payments: true,
-    extra_expenses: true,
-    cash_withdrawals: true
-  };
-  if(!allowed[table]) return null;
-  try {
-    if(!window.KoshDB || !KoshDB.available || !KoshDB.hasBusinessData()) return null;
-    const badDate = KoshDB.query(`SELECT COUNT(*) FROM ${table} WHERE local_date IS NULL OR local_date NOT GLOB '????-??-??'`);
-    const badDateCount = badDate && badDate[0] && badDate[0].values && badDate[0].values[0] ? Number(badDate[0].values[0][0]) || 0 : 0;
-    if(badDateCount > 0) return null;
-
-    let startYmd = getPeriodStartDate(periodType, periodDate);
-    let endYmd = typeof getPeriodEndDate === 'function' ? getPeriodEndDate(periodType, periodDate) : (periodDate || todayStr());
-    if(!startYmd || !endYmd) return null;
-    if(startYmd > endYmd) { const tmp = startYmd; startYmd = endYmd; endYmd = tmp; }
-
-    const res = KoshDB.query(
-      `SELECT json FROM ${table}
-       WHERE local_date >= ? AND local_date <= ?
-       ORDER BY local_date ASC, id ASC`,
-      [startYmd, endYmd]
-    );
-    if(!res || !res[0]) return [];
-    const out = [];
-    for(const row of res[0].values || []) {
-      try { out.push(JSON.parse(row[0])); } catch(_) {}
-    }
-    return out;
-  } catch(_) {
-    return null;
-  }
+// THERE IS ONE SOURCE OF TRUTH, AND IT IS THE SERVER.
+//
+// This used to read six tables straight out of the device's SQLite database and
+// prefer them over `data`, which is loaded from Postgres. On any device that
+// still had rows from the offline era - and every device the old app ran on
+// does - the old credits, payments and withdrawals silently won, and the
+// dashboard quoted figures from a database nobody had written to in months.
+//
+// Nothing reads SQLite now. The function stays so the six call sites below keep
+// their shape (`fromSqlite(...) || data.x.filter(...)`), and it always says "not
+// here", so the filter beside it is what runs. Deleting the calls instead would
+// touch six arithmetic expressions to no benefit.
+KoshCalc._loadPeriodJsonRowsFromSqlite = function() {
+  return null;
 };
 
 KoshCalc._computeFinancialSnapshotUncached = function(periodType, periodDate) {
@@ -119,18 +73,60 @@ KoshCalc._computeFinancialSnapshotUncached = function(periodType, periodDate) {
   // Linked returns are transactional adjustments and must remain visible in return totals.
   const grossSalesRevenue = round2(salesRaw.reduce((s, t) => s + (Number(t.total) || 0), 0));
   const saleReturnRevenue = round2(saleReturnsRaw.reduce((s, t) => s + (Number(t.total) || 0), 0));
+
+  // A DISCOUNT ON THE WHOLE BILL IS NOT REVENUE.
+  //
+  // Every row of a bill carries the same header discount, so it is counted once
+  // per bill. Summing it row by row would multiply it by the number of items.
+  //
+  // This used to be missing entirely: revenue was the sum of the line totals and
+  // the bill discount reduced nothing. The cash was right and the customer's
+  // balance was right; what the shop appeared to have EARNED was overstated by
+  // exactly the discount - 1,000 of revenue reported against 900 that would
+  // ever arrive. Corrected here and in 41_profit_summary.sql together, because
+  // correcting one calculator alone only makes the two disagree.
+  //
+  // Line discounts are not involved: sale_lines.line_total already has those
+  // taken off, by the column's own definition.
+  const billDiscountByBill = new Map();
+  for (const t of salesRaw) {
+    const bill = String(t.billId || t.id || '');
+    if (bill && !billDiscountByBill.has(bill)) {
+      billDiscountByBill.set(bill, Number(t.docBillDiscount) || 0);
+    }
+  }
+  const saleBillDiscount = round2([...billDiscountByBill.values()].reduce((s, v) => s + v, 0));
+
   // Period-consistent net sales: only current-period sale minus current-period sale return.
-  const netRevenue = round2(grossSalesRevenue - saleReturnRevenue);
+  const netRevenue = round2(grossSalesRevenue - saleBillDiscount - saleReturnRevenue);
 
   const grossSalesCost = round2(salesRaw.reduce((s, t) => s + saleCostTotal(t), 0));
   const saleReturnCost = round2(saleReturnsRaw.reduce((s, t) => s + returnCostTotal(t), 0));
   const netCost = round2(grossSalesCost - saleReturnCost);
-  // Stock adjustment losses (damage/theft/correction): user-stated value × qty.
-  // Prefer the stored exact total; cost × qty is only a legacy fallback (it rebuilds
-  // the amount from a rounded per-unit rate and can drift by a paisa per row).
+  // STOCK ADJUSTMENTS HAVE A DIRECTION.
+  //
+  // damage, theft and correction_out take goods off the shelf and cost the shop
+  // what those goods were worth. correction_in PUTS GOODS ON the shelf - it
+  // creates a lot, the same as an opening balance does (10_adjustments.sql).
+  //
+  // Every kind used to be added up together and called a loss, so finding stock
+  // you already owned made the day's profit fall by its value. Netted now, and
+  // netted rather than merely ignored: a stock count that comes out low is a
+  // cost, one that comes out high is not, and counting only the first would
+  // describe a business that can lose by counting but never gain.
+  //
+  // 41_profit_summary.sql applies the same rule; changing one alone would only
+  // make the two calculators disagree.
+  //
+  // The stored exact total is preferred; cost × qty is a legacy fallback (it
+  // rebuilds the amount from a rounded per-unit rate and can drift by a paisa).
   const adjustmentLossTotal = round2(adjustmentsRaw.reduce((s, t) => {
     const stored = Number(t.total);
-    return s + (Number.isFinite(stored) && stored > 0 ? round2(stored) : round2((Number(t.cost) || 0) * (Number(t.qty) || 0)));
+    const amount = Number.isFinite(stored) && stored > 0
+      ? round2(stored)
+      : round2((Number(t.cost) || 0) * (Number(t.qty) || 0));
+    const sign = String(t.adjustmentType || '') === 'correction_in' ? -1 : 1;
+    return s + sign * amount;
   }, 0));
   // Single source of truth for profit: net revenue - net cost - adjustment losses.
   const profit = round2(netRevenue - netCost - adjustmentLossTotal);
@@ -200,6 +196,7 @@ KoshCalc._computeFinancialSnapshotUncached = function(periodType, periodDate) {
     salesNet,
     purchasesNet,
     grossSalesRevenue,
+    saleBillDiscount,
     saleReturnRevenue,
     netRevenue,
     grossSalesCost,
@@ -398,6 +395,7 @@ function buildFinancialView(periodType, periodDate, opts = {}) {
 KoshCalc.buildFinancialUiMetrics = function(view) {
   const snap = view.snap;
   const grossRevenue = round2(snap.grossSalesRevenue || 0);
+  const billDiscount = round2(snap.saleBillDiscount || 0);
   const returnRevenue = round2(snap.saleReturnRevenue || 0);
   const netRevenue = round2(snap.netRevenue || 0);
   const profit = round2(snap.profit || 0);
@@ -408,6 +406,7 @@ KoshCalc.buildFinancialUiMetrics = function(view) {
   return {
     sales: {
       grossRevenue,
+      billDiscount,
       returnRevenue,
       netRevenue,
       profit,
@@ -447,7 +446,14 @@ KoshCalc.buildFinancialUiMetrics = function(view) {
       extraExpensesTotal: round2(snap.extraExpensesTotal || 0),
       extraExpensesList: snap.extraExpensesList || [],
       cashWithdrawalsTotal: round2(snap.cashWithdrawalsTotal || 0),
-      cashWithdrawalsList: snap.cashWithdrawalsList || []
+      cashWithdrawalsList: snap.cashWithdrawalsList || [],
+      // Repaying a loan is cash leaving the drawer, and netCashDelta/cashOut
+      // have always subtracted it - but it was never passed out here, so the
+      // dashboard and the report read `undefined || 0` and hid their own
+      // "Loan Payment" rows. The total was right and the breakdown under it did
+      // not add up to it, which is the worst way for a figure to be wrong.
+      loanPaymentCashOut: round2(snap.loanPaymentCashOut || 0),
+      loanPaymentsList: snap.loanPaymentsList || []
     },
     business: {
       stockValue: round2(view.stockValue || 0),
@@ -470,8 +476,14 @@ function buildFinancialUiMetrics(view) {
 function buildCentralOperationalMetrics(periodType, periodDate, view, metrics) {
   const snap = view.snap;
   const inPeriod = buildPeriodMatcher(periodType, periodDate);
-  const lowStockCount = data.products.filter(p => { const s = getStock(p.id); return s > 0 && s < 5; }).length;
-  const outStockCount = data.products.filter(p => getStock(p.id) <= 0).length;
+  // A removed product is not stock. Deleting a product deactivates it rather
+  // than dropping the row, so an old bill can still print the name it was sold
+  // under - but the dashboard was then raising an "out of stock" alert for
+  // every product the shopkeeper had deliberately removed, and those products
+  // appear on no screen where the alert could be acted on.
+  const stockedProducts = (data.products || []).filter(p => p && p.isActive !== false);
+  const lowStockCount = stockedProducts.filter(p => { const s = getStock(p.id); return s > 0 && s < 5; }).length;
+  const outStockCount = stockedProducts.filter(p => getStock(p.id) <= 0).length;
   const allPeriodReturns = [
     ...(snap.saleReturnsRaw || []),
     ...(snap.purchaseReturnsRaw || [])
@@ -499,7 +511,13 @@ KoshCalc.getCentralCalculationBundle = function(periodType, periodDate, opts = {
   const purchTxQ = String(opts.purchTxQ || '').toLowerCase().trim();
   const includeBusiness = opts.includeBusiness !== false;
   const includeOps = opts.includeOps !== false;
-  const cacheKey = [safeType, safeDate, saleTxQ, purchTxQ, includeBusiness ? 'business' : 'lean', includeOps ? 'ops' : 'noops', window.__dataRevision || 0].join('|');
+  // The last part flips when the server's per-product answer for this period
+  // arrives. Without it the cached bundle would keep serving the figures worked
+  // out before the answer came, and the re-render would change nothing.
+  const serverProdReady = !!(window.KoshTotals
+    && typeof KoshTotals.productSalesLoaded === 'function'
+    && KoshTotals.productSalesLoaded(safeType, safeDate));
+  const cacheKey = [safeType, safeDate, saleTxQ, purchTxQ, includeBusiness ? 'business' : 'lean', includeOps ? 'ops' : 'noops', window.__dataRevision || 0, serverProdReady ? 'srv' : 'local'].join('|');
   const cached = __centralBundleCache.get(cacheKey);
   if(cached) return cached;
   const view = KoshCalc.buildFinancialView(safeType, safeDate, { includeBusiness });
@@ -512,7 +530,15 @@ KoshCalc.getCentralCalculationBundle = function(periodType, periodDate, opts = {
   const saleRetTxns = snap.saleReturnsRaw || [];
   const purchaseTxns = (snap.purchasesRaw || []).filter(t => (Number(t.qty) || 0) > 0.0001);
   const purchaseRetTxns = snap.purchaseReturnsRaw || [];
-  const saleReportAgg = buildSaleReportAggregates({ txns: saleTxns, retTxnsAll: saleRetTxns, saleTxQ });
+  const saleReportAgg = buildSaleReportAggregates({
+    txns: saleTxns, retTxnsAll: saleRetTxns, saleTxQ,
+    // Null until the answer for this period arrives; the report re-renders when
+    // it does. See modules/reports.js.
+    serverProductSales: (window.KoshTotals && typeof KoshTotals.productSalesFor === 'function')
+      ? KoshTotals.productSalesFor(safeType, safeDate,
+          () => { if(typeof scheduleReportRender === 'function') scheduleReportRender(0); })
+      : null
+  });
   const purchaseReportAgg = buildPurchaseReportAggregates({ txns: purchaseTxns, purchRetTxnsAll: purchaseRetTxns, purchTxQ });
   const bundle = {
     periodType: safeType,
@@ -570,13 +596,34 @@ function buildDashboardAggregates({ sales, buys, allReturns }) {
   };
 }
 
-function buildSaleReportAggregates({ txns, retTxnsAll, saleTxQ }) {
+function buildSaleReportAggregates({ txns, retTxnsAll, saleTxQ, serverProductSales = null }) {
   const retTxns = retTxnsAll; // include linked returns — same scope as computeFinancialSnapshot
+
+  // A DISCOUNT ON THE WHOLE BILL BELONGS TO THE PRODUCTS ON THAT BILL.
+  //
+  // Without this the breakdown adds up to more than the revenue printed above
+  // it, and every product on a discounted bill looks more profitable than it
+  // was. Each line takes the share of the discount its own total earned.
+  //
+  // 42_product_sales.sql splits it by the same formula and rounds each share
+  // the same way, so the server's map and this one agree line for line.
+  const billLineSum = new Map();
+  txns.forEach(t => {
+    const bill = String(t.billId || '');
+    if(bill) billLineSum.set(bill, round2((billLineSum.get(bill) || 0) + (Number(t.total) || 0)));
+  });
+  const discountShare = (t) => {
+    const bill = String(t.billId || '');
+    const disc = Number(t.docBillDiscount) || 0;
+    const sum = bill ? (billLineSum.get(bill) || 0) : 0;
+    return (disc > 0 && sum > 0) ? round2(disc * (Number(t.total) || 0) / sum) : 0;
+  };
+
   const byProd = {};
   txns.forEach(t => {
     if(!byProd[t.productId]) byProd[t.productId] = { qty: 0, revenue: 0, cost: 0 };
     byProd[t.productId].qty += t.qty;
-    byProd[t.productId].revenue += t.total;
+    byProd[t.productId].revenue += round2((Number(t.total) || 0) - discountShare(t));
     byProd[t.productId].cost += saleCostTotal(t);
   });
   retTxns.forEach(t => {
@@ -585,6 +632,16 @@ function buildSaleReportAggregates({ txns, retTxnsAll, saleTxQ }) {
     byProd[t.productId].revenue -= t.total;
     byProd[t.productId].cost -= returnCostTotal(t);
   });
+  // The database's answer replaces this one when it has arrived. Only the three
+  // figures are taken - the sorting, the categories, the badges and the fast /
+  // slow split below are all derived from them, here, where the screen is.
+  if(serverProductSales instanceof Map) {
+    for(const key of Object.keys(byProd)) delete byProd[key];
+    for(const [pid, d] of serverProductSales) {
+      byProd[pid] = { qty: Number(d.qty) || 0, revenue: Number(d.revenue) || 0, cost: Number(d.cost) || 0 };
+    }
+  }
+
   const sorted = Object.entries(byProd).sort((a, b) => b[1].revenue - a[1].revenue);
   const maxRev = sorted.length ? sorted[0][1].revenue : 1;
   const byCategory = {};

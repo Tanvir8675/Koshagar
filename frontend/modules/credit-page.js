@@ -63,34 +63,120 @@ function creditRecordMatchesQuery(row, query, partyType) {
   return haystack.includes(q) || (!!qPhone && haystack.includes(qPhone));
 }
 
+// THE LINE THAT EXPLAINS THE GAP.
+//
+// The rows add up to the bill BEFORE any discount given on the whole bill, and
+// the Total beneath them is what the party was actually charged. With nothing
+// in between, a 2 x 500 bill totalling 700 reads as an arithmetic error - the
+// figure is right and the table looks wrong, which is the worst way to be
+// right.
+//
+// Only shown when there is something to explain.
+function billDiscountRow(rows, total) {
+  const sub = round2(rows.reduce((s, r) => s + (Number(r.sub) || 0), 0));
+  const discount = round2(sub - (Number(total) || 0));
+  if (!(discount > 0.005)) return '';
+  return `<tr style="border-top:1px dashed var(--border)">`
+    + `<td colspan="3" style="text-align:right;padding:5px 4px;font-weight:600;color:var(--ink2)">Discount</td>`
+    + `<td style="text-align:right;padding:5px 4px;font-weight:700;color:var(--red)">-${fmt(discount)}</td></tr>`;
+}
+
+// WHEN THE MONEY RUNS THE OTHER WAY, SAY SO.
+//
+// A tab called Customer normally lists people who owe the shop. A refund owed
+// back to a customer sits in the same tab - correctly, it is the same person -
+// but reading "Outstanding: 300" there would mean the opposite of the truth.
+// So the reversed rows carry their own words, and the word "Outstanding" is
+// kept for money coming in.
+function creditGroupWords(group, side) {
+  const reversed = !!(group && group.reversed);
+  if (!reversed) {
+    return {
+      badge: side === 'supplier' ? '⏳ You owe' : '⏳ Outstanding',
+      dueLabel: 'Outstanding: ',
+      note: ''
+    };
+  }
+  return {
+    badge: side === 'supplier' ? '↩️ They owe you' : '↩️ You owe them',
+    dueLabel: side === 'supplier' ? 'They owe you: ' : 'You owe them: ',
+    note: side === 'supplier'
+      ? 'This supplier owes the shop — usually a purchase return that was not refunded in cash.'
+      : 'The shop owes this customer — usually a sale return on a bill they had already paid.'
+  };
+}
+
 function buildCreditPageMetrics(creditPartyMode, creditFilter, query) {
   const centralCredit = buildCreditMetrics('daily', todayStr());
-  const allCredits = [...(centralCredit.allCredits || [])].sort((a,b)=>new Date(b.date)-new Date(a.date));
-  const allSupplierCredits = [...(centralCredit.allSupplierCredits || [])].sort((a,b)=>new Date(b.date)-new Date(a.date));
+  // WHICH TAB A BILL BELONGS IN IS ABOUT THE PARTY, NOT THE DIRECTION.
+  //
+  // The two lists behind these tabs are kept by direction - receivable and
+  // payable - because that is what every balance calculation needs. But a
+  // shopkeeper looking for Tanvir Ahmed looks under Customer, whether the shop
+  // owes him or he owes the shop. So the tabs are filled by SIDE, drawing from
+  // both lists; see creditSideOf() in index.html.
+  const everyBill = [...(centralCredit.allCredits || []), ...(centralCredit.allSupplierCredits || [])]
+    .sort((a,b)=>new Date(b.date)-new Date(a.date));
+  const allCredits = everyBill.filter(b => creditSideOf(b) === 'customer');
+  // A LOAN IS NOT A SUPPLIER BILL, AND MIXING THEM HID BOTH.
+  //
+  // Buying on credit brings goods and no cash; borrowing brings cash and no
+  // goods, and the amount need not match anything bought - 20,000 borrowed can
+  // buy 15,000 of stock. They are settled differently too: one is paid for, the
+  // other is repaid. Adding them into one "Total Supplier Due" answered neither
+  // "what do I owe my suppliers" nor "how much of my money is borrowed".
+  //
+  // Same list, same rendering, its own tab - so the split costs no new screen.
+  const allLoanCredits = everyBill.filter(b => b.isLoan);
+  const allSupplierCredits = everyBill.filter(b => creditSideOf(b) === 'supplier' && !b.isLoan);
   const q = String(query || '').toLowerCase().trim();
 
-  const totalCustDue = round2(Number(centralCredit.totalCustomerDue) || 0);
-  const totalSuppDue = round2(Number(centralCredit.totalSupplierDue) || 0);
-  const openCustCount = Number(centralCredit.openCustCount) || 0;
-  const openSuppCount = Number(centralCredit.openSuppCount) || 0;
+  // A CARD MUST ADD UP TO THE LIST UNDER IT.
+  //
+  // These came from buildCreditMetrics, which counts by direction across every
+  // bill - so once loans moved to their own tab the card said 16,000 while the
+  // list beneath it showed 10,000, and the missing 6,000 was on another screen.
+  // A total the reader cannot check against what they can see is worse than no
+  // total: it is the one figure they cannot verify and cannot ignore.
+  //
+  // So each card is now the sum of the tab it heads, counted the normal way
+  // round for that tab - what customers owe, what suppliers are owed. The
+  // reversed cases and the loans have their own lines in the sub-text, so
+  // nothing is hidden, it is just not added to a figure it contradicts.
+  const dueOfDirection = (rows, direction) => round2(rows
+    .filter(b => String(b.direction) === direction)
+    .reduce((s, b) => s + creditDueOf(b), 0));
 
-  let list = creditPartyMode === 'supplier' ? allSupplierCredits : allCredits;
-  if(creditPartyMode === 'supplier') {
-    if(creditFilter==='due') list = list.filter(sc=>getSupplierDue(sc)>0);
-    if(creditFilter==='done') list = list.filter(sc=>getSupplierDue(sc)<=0);
-    if(q) list = list.filter(sc=>creditRecordMatchesQuery(sc, q, 'supplier'));
-  } else {
-    if(creditFilter==='due') list = list.filter(c=>getCreditDue(c)>0);
-    if(creditFilter==='done') list = list.filter(c=>getCreditDue(c)<=0);
-    if(q) list = list.filter(c=>creditRecordMatchesQuery(c, q, 'customer'));
-  }
+  const totalCustDue = dueOfDirection(allCredits, 'receivable');
+  const totalSuppDue = dueOfDirection(allSupplierCredits, 'payable');
+  const openCustCount = new Set(allCredits
+    .filter(b => String(b.direction) === 'receivable' && creditDueOf(b) > 0)
+    .map(b => getCreditCustomerKey(b))).size;
+  const openSuppCount = new Set(allSupplierCredits
+    .filter(b => String(b.direction) === 'payable' && creditDueOf(b) > 0)
+    .map(b => getSupplierIdentityKey(b))).size;
+
+  let list = creditPartyMode === 'loan' ? allLoanCredits
+           : creditPartyMode === 'supplier' ? allSupplierCredits
+           : allCredits;
+  // creditDueOf() reads the row's own direction, so one filter serves a tab
+  // that now holds bills running both ways.
+  if(creditFilter==='due')  list = list.filter(b=>creditDueOf(b)>0);
+  if(creditFilter==='done') list = list.filter(b=>creditDueOf(b)<=0);
+  if(q) list = list.filter(b=>creditRecordMatchesQuery(b, q, creditPartyMode === 'customer' ? 'customer' : 'supplier'));
+  const totalLoanDue = round2(allLoanCredits.reduce((s,b)=>s+creditDueOf(b),0));
+
   return {
     allCredits,
     allSupplierCredits,
+    allLoanCredits,
+    totalLoanDue,
     totalCustDue,
     totalSuppDue,
     openCustCount,
     openSuppCount,
+    owedToCustomers: round2(Number(centralCredit.owedToCustomers) || 0),
+    owedBySuppliers: round2(Number(centralCredit.owedBySuppliers) || 0),
     filteredList: list
   };
 }
@@ -155,22 +241,30 @@ function updateCreditPreview() {
 
 function setCreditPartyMode(mode) {
   pgReset('creditList');
-  creditPartyMode = mode === 'supplier' ? 'supplier' : 'customer';
-  const isSupplier = creditPartyMode === 'supplier';
-  const cBtn = document.getElementById('creditModeCustomer');
-  const sBtn = document.getElementById('creditModeSupplier');
-  if(cBtn) {
-    cBtn.className = 'type-btn' + (isSupplier ? '' : ' active-sale');
-    cBtn.style.background = isSupplier ? 'var(--surface2)' : '';
-    cBtn.style.color = isSupplier ? 'var(--ink2)' : '';
-  }
-  if(sBtn) {
-    sBtn.className = 'type-btn' + (isSupplier ? ' active-buy' : '');
-    sBtn.style.background = isSupplier ? '' : 'var(--surface2)';
-    sBtn.style.color = isSupplier ? '' : 'var(--ink2)';
-  }
+  creditPartyMode = (mode === 'supplier' || mode === 'loan') ? mode : 'customer';
+  // One loop instead of a branch per button: three of them now, and the next
+  // one should not need this function rewritten again.
+  const buttons = {
+    customer: { id: 'creditModeCustomer', active: 'active-sale' },
+    supplier: { id: 'creditModeSupplier', active: 'active-buy'  },
+    loan:     { id: 'creditModeLoan',     active: 'active-buy'  }
+  };
+  Object.entries(buttons).forEach(([mode2, cfg]) => {
+    const btn = document.getElementById(cfg.id);
+    if(!btn) return;
+    const on = creditPartyMode === mode2;
+    btn.className = 'type-btn' + (on ? ' ' + cfg.active : '');
+    btn.style.background = on ? '' : 'var(--surface2)';
+    btn.style.color = on ? '' : 'var(--ink2)';
+  });
   const search = document.getElementById('creditSearch');
-  if(search) search.placeholder = isSupplier ? '🔍 Search supplier, phone, bill, product...' : '🔍 Search customer, phone, bill, product...';
+  if(search) {
+    search.placeholder = creditPartyMode === 'loan'
+      ? '🔍 Search lender, phone...'
+      : creditPartyMode === 'supplier'
+        ? '🔍 Search supplier, phone, bill, product...'
+        : '🔍 Search customer, phone, bill, product...';
+  }
   setCreditFilter('all');
 }
 
@@ -199,16 +293,18 @@ function renderCreditPage() {
   const allCredits = cm.allCredits;
   const allSupplierCredits = cm.allSupplierCredits;
   document.getElementById('creditStats').innerHTML=`
-    <div class="stat"><div class="stat-label">Total Customer Due</div><div class="stat-value red">${fmt(cm.totalCustDue)}</div><div class="stat-sub">${cm.openCustCount} customers</div></div>
-    <div class="stat"><div class="stat-label">Total Supplier Due</div><div class="stat-value red">${fmt(cm.totalSuppDue)}</div><div class="stat-sub">${cm.openSuppCount} suppliers</div></div>`;
+    <div class="stat"><div class="stat-label">Total Customer Due</div><div class="stat-value red">${fmt(cm.totalCustDue)}</div><div class="stat-sub">${cm.openCustCount} customer${cm.openCustCount===1?'':'s'}${cm.owedToCustomers>0?` · <span style="color:var(--blue)">you owe ${fmt(cm.owedToCustomers)}</span>`:''}</div></div>
+    <div class="stat"><div class="stat-label">${creditPartyMode === 'loan' ? 'Total Loan Due' : 'Total Supplier Due'}</div><div class="stat-value red">${fmt(creditPartyMode === 'loan' ? cm.totalLoanDue : cm.totalSuppDue)}</div><div class="stat-sub">${creditPartyMode === 'loan' ? `${cm.allLoanCredits.length} loan${cm.allLoanCredits.length===1?'':'s'}` : `${cm.openSuppCount} supplier${cm.openSuppCount===1?'':'s'}`}${creditPartyMode !== 'loan' && cm.totalLoanDue>0?` · <span style="color:var(--blue)">loans ${fmt(cm.totalLoanDue)}</span>`:''}${creditPartyMode !== 'loan' && cm.owedBySuppliers>0?` · <span style="color:var(--green)">they owe ${fmt(cm.owedBySuppliers)}</span>`:''}</div></div>`;
 
-  if(creditPartyMode === 'supplier') {
+  if(creditPartyMode === 'supplier' || creditPartyMode === 'loan') {
+    const isLoanTab = creditPartyMode === 'loan';
+    const tabAll = isLoanTab ? cm.allLoanCredits : allSupplierCredits;
     const groupedList = groupSupplierCredits(cm.filteredList);
     if(groupedList.length===0) {
-      const hint = creditFilter==='due' && allSupplierCredits.length>0
+      const hint = creditFilter==='due' && tabAll.length>0
         ? '<div class="empty-text" style="margin-top:4px;color:var(--ink2)">No outstanding now. Switch to All/Settled for history.</div>'
         : '';
-      document.getElementById('creditList').innerHTML=`<div class="empty"><div class="empty-icon">🏪</div><div class="empty-text">No supplier due records</div>${hint}</div>`;
+      document.getElementById('creditList').innerHTML=`<div class="empty"><div class="empty-icon">${isLoanTab ? '🏦' : '🏪'}</div><div class="empty-text">No ${isLoanTab ? 'loans' : 'supplier due'} records</div>${hint}</div>`;
       return;
     }
     renderPaged('creditList', groupedList, g=>{
@@ -217,7 +313,7 @@ function renderCreditPage() {
       const total = g.total;
       const pct = total>0 ? Math.min(100,(paid/total*100)).toFixed(0) : 0;
     const settled = due<=0.001;
-    const openBillCount = g.bills.filter(sc => getSupplierDue(sc) > 0.001).length;
+    const openBillCount = g.bills.filter(sc => creditDueOf(sc) > 0.001).length;
       const latestDate = g.bills.length ? (displayDateTime(g.bills.slice().sort((a,b)=>new Date(b.date)-new Date(a.date))[0].date) || dateToYMDLocal(g.bills.slice().sort((a,b)=>new Date(b.date)-new Date(a.date))[0].date)) : '-';
       const phoneText = g.supplierPhone ? ` · 📞 ${g.supplierPhone}` : '';
       const billRows = g.bills
@@ -227,7 +323,11 @@ function renderCreditPage() {
           const bDue = getSupplierDue(sc);
           const bPaid = getSupplierTotalPaid(sc);
           const bSettled = bDue <= 0.001;
-          const billLabel = sc.billId ? `Bill ${sc.billId}` : `Tx #${sc.txId}`;
+          // A loan has no invoice number, so naming it "Bill <uuid>" said
+          // nothing and looked broken. It is identified by who lent the money.
+          const billLabel = sc.isLoan
+            ? `Loan from ${escapeHtml(sc.lenderName || sc.supplierName || 'lender')}`
+            : (sc.billId ? `Bill ${displayBillNo(sc.billId)}` : `Tx #${sc.txId}`);
           const scInitialPaid = round2(Number(sc.paid) || 0);
           // Product list for subtitle
           const scItemsText = Array.isArray(sc.products) && sc.products.length > 0
@@ -237,11 +337,20 @@ function renderCreditPage() {
           const scProds = Array.isArray(sc.products) && sc.products.length > 0
             ? sc.products.map(pr=>{const prod=getProd(pr.productId);const sub=round2((pr.qty||0)*(pr.price||0));return {name:prod?.name||'?',unit:prod?.unit||'',qty:pr.qty||0,price:pr.price||0,sub};})
             : (()=>{const p=getProd(sc.productId);const sub=round2((sc.qty||0)*(sc.price||0));return [{name:p?.name||'?',unit:p?.unit||'',qty:sc.qty||0,price:sc.price||0,sub}];})();
-          const scProdBreakdown = `<div id="sbd_${sc.id}" style="display:none;margin-top:8px;border-radius:7px;background:var(--surface2);padding:6px 8px"><div style="font-size:0.62rem;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--ink2);margin-bottom:5px">Bill Breakdown</div><table style="width:100%;border-collapse:collapse;font-size:0.72rem"><thead><tr style="border-bottom:1px solid var(--border)"><th style="text-align:left;padding:3px 4px;color:var(--ink2);font-weight:600">Product</th><th style="text-align:right;padding:3px 4px;color:var(--ink2);font-weight:600">Qty</th><th style="text-align:right;padding:3px 4px;color:var(--ink2);font-weight:600">Unit Price</th><th style="text-align:right;padding:3px 4px;color:var(--ink2);font-weight:600">Subtotal</th></tr></thead><tbody>${scProds.map(r=>`<tr style="border-bottom:1px dashed var(--border)"><td style="padding:4px 4px;font-weight:600">${r.name}</td><td style="text-align:right;padding:4px 4px;color:var(--ink2)">${r.qty} ${r.unit}</td><td style="text-align:right;padding:4px 4px;color:var(--ink2)">${fmt(r.price)}</td><td style="text-align:right;padding:4px 4px;font-weight:700">${fmt(r.sub)}</td></tr>`).join('')}</tbody><tfoot><tr style="border-top:1.5px solid var(--border)"><td colspan="3" style="text-align:right;padding:5px 4px;font-weight:700;color:var(--ink2)">Total</td><td style="text-align:right;padding:5px 4px;font-weight:700;color:var(--ink);font-size:0.82rem">${fmt(sc.total)}</td></tr></tfoot></table></div>`;
-          const scPayments = (data.supplierPayments || []).filter(p=>String(p.scId)===String(sc.id)).slice().sort((a,b)=>new Date(a.date)-new Date(b.date));
+          const scProdBreakdown = `<div id="sbd_${sc.id}" style="display:none;margin-top:8px;border-radius:7px;background:var(--surface2);padding:6px 8px"><div style="font-size:0.62rem;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--ink2);margin-bottom:5px">Bill Breakdown</div><table style="width:100%;border-collapse:collapse;font-size:0.72rem"><thead><tr style="border-bottom:1px solid var(--border)"><th style="text-align:left;padding:3px 4px;color:var(--ink2);font-weight:600">Product</th><th style="text-align:right;padding:3px 4px;color:var(--ink2);font-weight:600">Qty</th><th style="text-align:right;padding:3px 4px;color:var(--ink2);font-weight:600">Unit Price</th><th style="text-align:right;padding:3px 4px;color:var(--ink2);font-weight:600">Subtotal</th></tr></thead><tbody>${scProds.map(r=>`<tr style="border-bottom:1px dashed var(--border)"><td style="padding:4px 4px;font-weight:600">${r.name}</td><td style="text-align:right;padding:4px 4px;color:var(--ink2)">${r.qty} ${r.unit}</td><td style="text-align:right;padding:4px 4px;color:var(--ink2)">${fmt(r.price)}</td><td style="text-align:right;padding:4px 4px;font-weight:700">${fmt(r.sub)}</td></tr>`).join('')}</tbody><tfoot>${billDiscountRow(scProds, sc.total)}<tr style="border-top:1.5px solid var(--border)"><td colspan="3" style="text-align:right;padding:5px 4px;font-weight:700;color:var(--ink2)">Total</td><td style="text-align:right;padding:5px 4px;font-weight:700;color:var(--ink);font-size:0.82rem">${fmt(sc.total)}</td></tr></tfoot></table></div>`;
+          // Loan repayments are kept in their own list, because financial.js
+          // counts them separately from supplier payments - leaving them in both
+          // would spend every repayment twice. They still belong in this bill's
+          // history: the due above has already come down by them, and a history
+          // that omits them reads as "nothing paid" beside a figure saying
+          // otherwise.
+          const scPayments = [
+            ...(data.supplierPayments || []),
+            ...(data.loanPayments || [])
+          ].filter(p=>String(p.scId)===String(sc.id)).slice().sort((a,b)=>new Date(a.date)-new Date(b.date));
           const scHistRows = [];
           if(scInitialPaid > 0) scHistRows.push(`<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px dashed var(--border)"><span style="font-size:0.68rem;color:var(--ink2)">📅 ${displayDateTime(sc.date) || dateToYMDLocal(sc.date)} &nbsp;·&nbsp; Initial</span><span style="font-size:0.7rem;font-weight:700;color:var(--blue)">+${fmt(scInitialPaid)}</span></div>`);
-          scPayments.forEach(p=>{const pDate=displayDateTime(p.date)||dateToYMDLocal(p.date);const note=p.note?` · ${p.note}`:'';scHistRows.push(`<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px dashed var(--border)"><span style="font-size:0.68rem;color:var(--ink2)">📅 ${pDate}${note}</span><div style="display:flex;align-items:center;gap:3px"><span style="font-size:0.7rem;font-weight:700;color:var(--blue)">+${fmt(Number(p.amount)||0)}</span><button onclick="editPaymentEntry('${p.id}','supplier')" style="background:none;border:none;cursor:pointer;font-size:0.78rem;padding:1px 4px;color:var(--gold);line-height:1" title="Edit">✏️</button><button onclick="deletePaymentEntry('${p.id}','supplier')" style="background:none;border:none;cursor:pointer;font-size:0.78rem;padding:1px 4px;color:var(--red);line-height:1" title="Delete">🗑</button></div></div>`);});
+          scPayments.forEach(p=>{const pDate=displayDateTime(p.date)||dateToYMDLocal(p.date);const note=p.note?` · ${p.note}`:'';scHistRows.push(`<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px dashed var(--border)"><span style="font-size:0.68rem;color:var(--ink2)">📅 ${pDate}${note}${txEditNote(p)}</span><div style="display:flex;align-items:center;gap:3px"><span style="font-size:0.7rem;font-weight:700;color:var(--blue)">+${fmt(Number(p.amount)||0)}</span><button onclick="editPaymentEntry('${p.id}','supplier')" style="background:none;border:none;cursor:pointer;font-size:0.78rem;padding:1px 4px;color:var(--gold);line-height:1" title="Edit">✏️</button><button onclick="deletePaymentEntry('${p.id}','supplier')" style="background:none;border:none;cursor:pointer;font-size:0.78rem;padding:1px 4px;color:var(--red);line-height:1" title="Delete">🗑</button></div></div>`);});
           const scHistHtml = scHistRows.length>0
             ? `<div style="margin-top:7px;border-radius:7px;background:var(--blue-light);padding:5px 8px"><div style="font-size:0.62rem;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--ink2);margin-bottom:3px">Payment History</div>${scHistRows.join('')}<div style="display:flex;justify-content:space-between;padding-top:4px"><span style="font-size:0.68rem;font-weight:700;color:var(--ink2)">Total Paid</span><span style="font-size:0.7rem;font-weight:700;color:var(--blue)">${fmt(bPaid)}</span></div></div>`
             : `<div style="margin-top:5px;font-size:0.68rem;color:var(--ink2)">No payments recorded yet.</div>`;
@@ -258,7 +367,7 @@ function renderCreditPage() {
             ${scProdBreakdown}
             ${scHistHtml}
             <div style="display:flex;gap:8px;margin-top:7px">
-              ${!bSettled?`<button class="pay-btn" style="background:var(--blue)" onclick="openSupplierPayModal(${sc.id})">🏪 Pay Supplier</button>`:`<button class="pay-btn" style="background:var(--ink2);display:inline-flex;align-items:center;gap:5px" onclick="deleteSupplierCredit(${sc.id})"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v10a2 2 0 002 2h12a2 2 0 002-2V8"/><line x1="10" y1="13" x2="14" y2="13"/></svg>Archive</button>`}
+              ${(!bSettled && !g.reversed)?`<button class="pay-btn" style="background:var(--blue)" onclick="openSupplierPayModal('${sc.id}')">🏪 Pay Supplier</button>`:`<button class="pay-btn" style="background:var(--ink2);display:inline-flex;align-items:center;gap:5px" onclick="deleteSupplierCredit('${sc.id}')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v10a2 2 0 002 2h12a2 2 0 002-2V8"/><line x1="10" y1="13" x2="14" y2="13"/></svg>Archive</button>`}
             </div>
           </div>`;
         }).join('');
@@ -269,17 +378,17 @@ function renderCreditPage() {
             <div class="credit-meta">${latestDate}${phoneText} · ${g.count} bill(s)</div>
             <div style="font-size:0.72rem;color:var(--ink2);margin-top:2px"><b>Combined:</b> Total ${fmt(total)} · Paid ${fmt(paid)} · Outstanding ${fmt(due)}</div>
           </div>
-          <span class="${settled?'badge-paid':'badge-due'}">${settled?'✅ Settled':'⏳ Outstanding'}</span>
+          <span class="${settled?'badge-paid':'badge-due'}">${settled?'✅ Settled':creditGroupWords(g,'supplier').badge}</span>
         </div>
         <div class="credit-bar-wrap">
           <div class="credit-bar-fill" style="width:${pct}%;background:${settled?'var(--green)':'var(--blue)'}"></div>
         </div>
         <div class="credit-amounts">
           <span class="credit-paid-tag">Paid: ${fmt(paid)}</span>
-          <span class="credit-due-tag" style="color:${settled?'var(--green)':'var(--red)'}">${settled?'Settled':'Outstanding: '+fmt(due)}</span>
+          <span class="credit-due-tag" style="color:${settled?'var(--green)':(g.reversed?'var(--green)':'var(--red)')}">${settled?'Settled':creditGroupWords(g,'supplier').dueLabel+fmt(due)}</span>
         </div>
         <div style="display:flex;gap:8px;margin-top:8px">
-          ${(!settled && openBillCount > 1)?`<button class="pay-btn" style="background:var(--blue)" onclick='openSupplierPayModalByKey(${JSON.stringify(g.key)})'>🏪 Pay All Bills</button>`:''}
+          ${(!settled && !g.reversed && openBillCount > 1)?`<button class="pay-btn" style="background:var(--blue)" onclick='openSupplierPayModalByKey(${JSON.stringify(g.key)})'>🏪 Pay All Bills</button>`:''}
         </div>
         ${billRows}
       </div>`;
@@ -298,7 +407,7 @@ function renderCreditPage() {
   renderPaged('creditList', groupedCustomers, g=>{
     const pct = g.total>0 ? Math.min(100,(g.paid/g.total*100)).toFixed(0) : 0;
     const settled = g.due<=0.001;
-    const openBillCount = g.bills.filter(c => getCreditDue(c) > 0.001).length;
+    const openBillCount = g.bills.filter(c => creditDueOf(c) > 0.001).length;
     const phoneText = g.customerPhone ? ` · 📞 ${g.customerPhone}` : '';
     const billRows = g.bills
       .slice()
@@ -312,18 +421,18 @@ function renderCreditPage() {
         const payments = data.payments.filter(p=>String(p.creditId)===String(credit.id)).slice().sort((a,b)=>new Date(a.date)-new Date(b.date));
         // Product breakdown
         const cProds = (credit.products||[]).map(p=>{const pr=getProd(p.productId);const sub=round2((p.qty||0)*(p.price||0));return {name:pr?.name||'?',unit:pr?.unit||'',qty:p.qty||0,price:p.price||0,sub};});
-        const cProdBreakdown = cProds.length>0?`<div id="cbd_${credit.id}" style="display:none;margin-top:8px;border-radius:7px;background:var(--surface2);padding:6px 8px"><div style="font-size:0.62rem;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--ink2);margin-bottom:5px">Bill Breakdown</div><table style="width:100%;border-collapse:collapse;font-size:0.72rem"><thead><tr style="border-bottom:1px solid var(--border)"><th style="text-align:left;padding:3px 4px;color:var(--ink2);font-weight:600">Product</th><th style="text-align:right;padding:3px 4px;color:var(--ink2);font-weight:600">Qty</th><th style="text-align:right;padding:3px 4px;color:var(--ink2);font-weight:600">Unit Price</th><th style="text-align:right;padding:3px 4px;color:var(--ink2);font-weight:600">Subtotal</th></tr></thead><tbody>${cProds.map(r=>`<tr style="border-bottom:1px dashed var(--border)"><td style="padding:4px 4px;font-weight:600">${r.name}</td><td style="text-align:right;padding:4px 4px;color:var(--ink2)">${r.qty} ${r.unit}</td><td style="text-align:right;padding:4px 4px;color:var(--ink2)">${fmt(r.price)}</td><td style="text-align:right;padding:4px 4px;font-weight:700">${fmt(r.sub)}</td></tr>`).join('')}</tbody><tfoot><tr style="border-top:1.5px solid var(--border)"><td colspan="3" style="text-align:right;padding:5px 4px;font-weight:700;color:var(--ink2)">Total</td><td style="text-align:right;padding:5px 4px;font-weight:700;color:var(--ink);font-size:0.82rem">${fmt(credit.total)}</td></tr></tfoot></table></div>`:'';
+        const cProdBreakdown = cProds.length>0?`<div id="cbd_${credit.id}" style="display:none;margin-top:8px;border-radius:7px;background:var(--surface2);padding:6px 8px"><div style="font-size:0.62rem;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--ink2);margin-bottom:5px">Bill Breakdown</div><table style="width:100%;border-collapse:collapse;font-size:0.72rem"><thead><tr style="border-bottom:1px solid var(--border)"><th style="text-align:left;padding:3px 4px;color:var(--ink2);font-weight:600">Product</th><th style="text-align:right;padding:3px 4px;color:var(--ink2);font-weight:600">Qty</th><th style="text-align:right;padding:3px 4px;color:var(--ink2);font-weight:600">Unit Price</th><th style="text-align:right;padding:3px 4px;color:var(--ink2);font-weight:600">Subtotal</th></tr></thead><tbody>${cProds.map(r=>`<tr style="border-bottom:1px dashed var(--border)"><td style="padding:4px 4px;font-weight:600">${r.name}</td><td style="text-align:right;padding:4px 4px;color:var(--ink2)">${r.qty} ${r.unit}</td><td style="text-align:right;padding:4px 4px;color:var(--ink2)">${fmt(r.price)}</td><td style="text-align:right;padding:4px 4px;font-weight:700">${fmt(r.sub)}</td></tr>`).join('')}</tbody><tfoot>${billDiscountRow(cProds, credit.total)}<tr style="border-top:1.5px solid var(--border)"><td colspan="3" style="text-align:right;padding:5px 4px;font-weight:700;color:var(--ink2)">Total</td><td style="text-align:right;padding:5px 4px;font-weight:700;color:var(--ink);font-size:0.82rem">${fmt(credit.total)}</td></tr></tfoot></table></div>`:'';
         // Payment history
         const histRows = [];
         if(initialPaid > 0) histRows.push(`<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px dashed var(--border)"><span style="font-size:0.68rem;color:var(--ink2)">📅 ${dateStr} &nbsp;·&nbsp; Initial</span><span style="font-size:0.7rem;font-weight:700;color:var(--green)">+${fmt(initialPaid)}</span></div>`);
-        payments.forEach(p=>{const pDate=displayDateTime(p.date)||dateToYMDLocal(p.date);const note=p.note?` · ${p.note}`:'';histRows.push(`<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px dashed var(--border)"><span style="font-size:0.68rem;color:var(--ink2)">📅 ${pDate}${note}</span><div style="display:flex;align-items:center;gap:3px"><span style="font-size:0.7rem;font-weight:700;color:var(--green)">+${fmt(Number(p.amount)||0)}</span><button onclick="editPaymentEntry('${p.id}','customer')" style="background:none;border:none;cursor:pointer;font-size:0.78rem;padding:1px 4px;color:var(--gold);line-height:1" title="Edit">✏️</button><button onclick="deletePaymentEntry('${p.id}','customer')" style="background:none;border:none;cursor:pointer;font-size:0.78rem;padding:1px 4px;color:var(--red);line-height:1" title="Delete">🗑</button></div></div>`);});
+        payments.forEach(p=>{const pDate=displayDateTime(p.date)||dateToYMDLocal(p.date);const note=p.note?` · ${p.note}`:'';histRows.push(`<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px dashed var(--border)"><span style="font-size:0.68rem;color:var(--ink2)">📅 ${pDate}${note}${txEditNote(p)}</span><div style="display:flex;align-items:center;gap:3px"><span style="font-size:0.7rem;font-weight:700;color:var(--green)">+${fmt(Number(p.amount)||0)}</span><button onclick="editPaymentEntry('${p.id}','customer')" style="background:none;border:none;cursor:pointer;font-size:0.78rem;padding:1px 4px;color:var(--gold);line-height:1" title="Edit">✏️</button><button onclick="deletePaymentEntry('${p.id}','customer')" style="background:none;border:none;cursor:pointer;font-size:0.78rem;padding:1px 4px;color:var(--red);line-height:1" title="Delete">🗑</button></div></div>`);});
         const histHtml = histRows.length>0
           ? `<div style="margin-top:7px;border-radius:7px;background:var(--green-light);padding:5px 8px"><div style="font-size:0.62rem;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--ink2);margin-bottom:3px">Payment History</div>${histRows.join('')}<div style="display:flex;justify-content:space-between;padding-top:4px"><span style="font-size:0.68rem;font-weight:700;color:var(--ink2)">Total Paid</span><span style="font-size:0.7rem;font-weight:700;color:var(--green)">${fmt(totalPaid)}</span></div></div>`
           : `<div style="margin-top:5px;font-size:0.68rem;color:var(--ink2)">No payments recorded yet.</div>`;
         return `<div style="border:1px dashed var(--border);border-radius:8px;padding:8px 9px;margin-top:8px">
           <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;cursor:pointer" onclick="(function(){var d=document.getElementById('cbd_${credit.id}');if(d)d.style.display=d.style.display==='none'?'block':'none';})()">
             <div>
-              <div style="font-size:0.78rem;font-weight:700;color:var(--ink)">${credit.billId ? `Bill ${credit.billId}` : `Tx #${credit.txId}`} <span style="font-size:0.65rem;color:var(--gold);font-weight:600">▾ Details</span></div>
+              <div style="font-size:0.78rem;font-weight:700;color:var(--ink)">${credit.billId ? `Bill ${displayBillNo(credit.billId)}` : `Tx #${credit.txId}`} <span style="font-size:0.65rem;color:var(--gold);font-weight:600">▾ Details</span></div>
               <div style="font-size:0.72rem;color:var(--ink2)">${dateStr} · ${(credit.products||[]).map(p=>{const pr=getProd(p.productId);return `${p.qty} ${pr?.unit||''} ${pr?.name||'?'}`;}).join(', ')}</div>
             </div>
             <div style="text-align:right">
@@ -333,8 +442,9 @@ function renderCreditPage() {
           ${cProdBreakdown}
           ${histHtml}
           <div style="display:flex;gap:8px;margin-top:7px">
-            ${!bSettled?`<button class="pay-btn" onclick="openPayModal(${credit.id})">💰 Pay This Bill</button>`:''}
-            ${bSettled?`<button class="pay-btn" style="background:var(--ink2);display:inline-flex;align-items:center;gap:5px" onclick="deleteCredit(${credit.id})"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v10a2 2 0 002 2h12a2 2 0 002-2V8"/><line x1="10" y1="13" x2="14" y2="13"/></svg>Archive</button>`:''}
+            ${(!bSettled && !g.reversed)?`<button class="pay-btn" onclick="openPayModal('${credit.id}')">💰 Pay This Bill</button>`:''}
+            ${g.reversed?`<span style="font-size:0.68rem;color:var(--ink2)">Settled by refunding the customer, not by collecting.</span>`:''}
+            ${bSettled?`<button class="pay-btn" style="background:var(--ink2);display:inline-flex;align-items:center;gap:5px" onclick="deleteCredit('${credit.id}')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v10a2 2 0 002 2h12a2 2 0 002-2V8"/><line x1="10" y1="13" x2="14" y2="13"/></svg>Archive</button>`:''}
           </div>
         </div>`;
       }).join('');
@@ -345,17 +455,17 @@ function renderCreditPage() {
           <div class="credit-meta">${g.count} bill(s)${phoneText}</div>
           <div style="font-size:0.72rem;color:var(--ink2);margin-top:2px"><b>Combined:</b> Total ${fmt(g.total)} · Paid ${fmt(g.paid)} · Outstanding ${fmt(g.due)}</div>
         </div>
-        <span class="${settled?'badge-paid':'badge-due'}">${settled?'✅ Settled':'⏳ Outstanding'}</span>
+        <span class="${settled?'badge-paid':'badge-due'}">${settled?'✅ Settled':creditGroupWords(g,'customer').badge}</span>
       </div>
       <div class="credit-bar-wrap">
         <div class="credit-bar-fill" style="width:${pct}%;background:${settled?'var(--green)':'var(--gold)'}"></div>
       </div>
       <div class="credit-amounts">
         <span class="credit-paid-tag">Paid: ${fmt(g.paid)}</span>
-        <span class="credit-due-tag" style="color:${settled?'var(--green)':'var(--red)'}">${settled?'Settled':'Outstanding: '+fmt(g.due)}</span>
+        <span class="credit-due-tag" style="color:${settled?'var(--green)':(g.reversed?'var(--blue)':'var(--red)')}">${settled?'Settled':creditGroupWords(g,'customer').dueLabel+fmt(g.due)}</span>
       </div>
       <div style="display:flex;gap:8px;margin-top:9px">
-        ${(!settled && openBillCount > 1)?`<button class="pay-btn" onclick='openPayModalByCustomerKey(${JSON.stringify(g.key)})'>💰 Pay All Bills</button>`:''}
+        ${(!settled && !g.reversed && openBillCount > 1)?`<button class="pay-btn" onclick='openPayModalByCustomerKey(${JSON.stringify(g.key)})'>💰 Pay All Bills</button>`:''}
       </div>
       ${billRows}
     </div>`;

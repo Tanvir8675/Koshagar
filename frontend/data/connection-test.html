@@ -87,11 +87,20 @@
   </div>
 
   <div id="paneOtp" class="hide">
-    <p class="hint">A code was emailed to <b id="otpEmail"></b>. Enter it to finish.</p>
-    <label>Code</label>
-    <input id="otpCode" inputmode="numeric" placeholder="6 digits">
-    <button onclick="doVerify()">Verify</button>
-    <button class="alt" onclick="doResend()">Send again</button>
+    <p class="hint">
+      A confirmation email has gone to <b id="otpEmail"></b>.<br>
+      <b>Open it and click the link.</b> You will land back here, signed in.
+    </p>
+    <p class="hint">
+      Supabase sends a link rather than a code until custom SMTP is configured -
+      its own mail service does not allow the template to be edited. Once SMTP
+      is set up the template can send a 6-digit code instead, and the box below
+      will take it.
+    </p>
+    <label>Code (only if your email contained one)</label>
+    <input id="otpCode" inputmode="numeric" placeholder="6 digits — leave empty if you got a link">
+    <button onclick="doVerify()">Verify code</button>
+    <button class="alt" onclick="doResend()">Send the email again</button>
   </div>
 
   <div id="authMsg" class="msg"></div>
@@ -148,12 +157,16 @@ async function doSignUp() {
     $('otpEmail').textContent = email;
     $('paneUp').classList.add('hide');
     $('paneOtp').classList.remove('hide');
-    say('authMsg', 'Account created. Check your email for the code.', true);
+    say('authMsg', 'Account created. Open the email and click the confirmation link — it brings you back here signed in.', true);
   } catch (e) { say('authMsg', e.message, false); }
 }
 
 async function doVerify() {
   try {
+    if (!$('otpCode').value.trim()) {
+      say('authMsg', 'No code entered. If your email contained a link, click that instead.', false);
+      return;
+    }
     await KoshAuth.verifyOtp({ email: pendingEmail, token: $('otpCode').value });
     say('authMsg', 'Verified. Signing you in…', true);
     await afterSignIn();
@@ -254,8 +267,44 @@ async function loadEverything() {
   }
 }
 
-// Resume an existing session on load.
+// -------------------------------------------------------------------------
+// Arriving back from the confirmation email.
+//
+// Supabase appends the session to the URL fragment (#access_token=...). The
+// fragment never reaches a server, which is why the tokens travel there - but
+// it also means they sit in the address bar and in history, so they are cleared
+// as soon as they have been read.
+// -------------------------------------------------------------------------
+function sessionFromUrl() {
+  const h = new URLSearchParams(String(location.hash || '').replace(/^#/, ''));
+  if (h.get('error')) {
+    const code = h.get('error_code') || '';
+    history.replaceState(null, '', location.pathname);
+    return { error: /expired/i.test(code)
+      ? '⏰ That confirmation link has expired or was already used. Sign in below, or send the email again.'
+      : `❌ ${h.get('error_description') || 'That link did not work.'}` };
+  }
+  const access_token = h.get('access_token');
+  if (!access_token) return null;
+  const session = {
+    access_token,
+    refresh_token: h.get('refresh_token'),
+    expires_at: Number(h.get('expires_at') || 0),
+    token_type: h.get('token_type') || 'bearer'
+  };
+  history.replaceState(null, '', location.pathname);   // do not leave tokens in the URL
+  return { session };
+}
+
 (async () => {
+  const fromLink = sessionFromUrl();
+  if (fromLink?.error) { say('authMsg', fromLink.error, false); return; }
+  if (fromLink?.session) {
+    KoshApi.session.save(fromLink.session);
+    say('authMsg', 'Email confirmed — you are signed in.', true);
+    await afterSignIn();
+    return;
+  }
   const s = KoshAuth.restore();
   if (s) { await KoshAuth.refreshIfNeeded(s); await afterSignIn(); }
 })();

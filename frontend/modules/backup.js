@@ -5,7 +5,7 @@
 // all data (user-triggered, PIN-gated). Depends on globals: storageGet/Set,
 // AB_FREQ_KEY, AB_LAST_KEY, isLoggedIn, data, nextPid/nextTid/.../nextAuditId,
 // toast, closeSettings, runEngineCommand, reconcileDataConsistency, showPage,
-// sha256pin, simpleHash, userPin, makeTimeId, makePid, window.MyShopNative.
+// verifyAdminPinInput, makeTimeId, makePid, window.MyShopNative.
 
 function getAutoBackupFreq() { return storageGet('local', AB_FREQ_KEY) || 'off'; }
 function getAutoBackupLastDate() { return storageGet('local', AB_LAST_KEY) || null; }
@@ -28,6 +28,9 @@ const SAFETY_BACKUP_INDEX_KEY = 'koshSafetyBackupIndexV1';
 const SAFETY_BACKUP_KEY_PREFIX = 'koshSafetyBackupV1:';
 const SAFETY_BACKUP_KEEP = 8;
 
+// The app's own JSON shape - the flat products/transactions the browser used to
+// hold. Restorable only by the offline build; the server knows nothing about it.
+// buildServerBackupPayload() below is what an online backup is made of.
 function buildBackupPayload(reason) {
   return {
     version: 1,
@@ -116,12 +119,23 @@ async function readSafetyBackupPayload(key) {
   return raw ? JSON.parse(raw) : null;
 }
 
+// The copy the app keeps for itself, before anything destructive.
+//
+// Online it holds the SERVER's export, not the browser's flat copy - so a
+// safety backup exported from the Safety Backups screen is a file Import can
+// actually take back. A safety net you cannot climb is not one.
 async function saveInternalSafetyBackup(reason) {
   try {
     if(!isLoggedIn || !data) return false;
-    const payload = buildBackupPayload(reason || 'safety');
+    let payload = null;
+    if(importIsServerSide()) {
+      try { payload = await KoshWrite.exportShop(); } catch(e) {
+        console.warn('Server safety backup failed, keeping the local shape:', e);
+      }
+    }
+    if(!payload) payload = buildBackupPayload(reason || 'safety');
     const json = JSON.stringify(payload);
-    const at = payload.exportedAt;
+    const at = payload.exportedAt || payload.exported_at || new Date().toISOString();
     const key = `${SAFETY_BACKUP_KEY_PREFIX}${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
     let index = await readSafetyBackupIndex();
     if(db) await idbPutValue(key, json);
@@ -150,6 +164,8 @@ function safetyBackupReasonLabel(reason) {
   };
   const raw = String(reason || 'Safety Backup');
   if(labels[raw]) return labels[raw];
+  // Delete by Date is gone, but safety backups taken before an old one may
+  // still be on the device, so their label is still understood here.
   if(raw.startsWith('before-delete-by-date-')) return 'Before Delete by Date ' + raw.replace('before-delete-by-date-', '');
   return raw.replace(/-/g, ' ');
 }
@@ -213,9 +229,11 @@ async function exportSafetyBackup(encodedKey) {
   try {
     const key = decodeURIComponent(encodedKey);
     const payload = await readSafetyBackupPayload(key);
-    if(!payload || !payload.data) { toast('âŒ Backup not found'); return; }
+    // Either shape may be in store: the server's snapshot (format_version) or
+    // the older flat one (data). Both are worth handing back.
+    if(!payload || !(payload.data || payload.format_version)) { toast('❌ Backup not found'); return; }
     const json = JSON.stringify(payload, null, 2);
-    const dateStr = String(payload.exportedAt || new Date().toISOString()).slice(0,10);
+    const dateStr = String(payload.exportedAt || payload.exported_at || new Date().toISOString()).slice(0,10);
     const fileName = `shop-safety-backup-${dateStr}.json`;
     if(window.MyShopNative && typeof window.MyShopNative.exportBackup === 'function') {
       const result = await window.MyShopNative.exportBackup(json, fileName);
@@ -255,7 +273,7 @@ async function confirmSafetyRestore() {
   const errorEl = document.getElementById('safetyRestoreError');
   if(!encodedKey) { closeSafetyRestoreModal(); return; }
   if(!pin) { errorEl.textContent = '⚠️ Enter your PIN'; return; }
-  if(await sha256pin(pin) !== userPin && simpleHash(pin) !== userPin) {
+  if(!await verifyAdminPinInput(pin)) {
     errorEl.textContent = '❌ Incorrect PIN';
     return;
   }
@@ -384,11 +402,31 @@ async function runAutoBackupIfNeeded() {
 
 // —— EXPORT / IMPORT ——————————————————————————————————————————————————————————
 
+// ONE backup file, in the shape the restore reads.
+//
+// This used to write buildBackupPayload() - the browser's own flat copy of the
+// data. That file cannot be restored: the server's restore takes a snapshot of
+// its own rows (format_version 2), and the app correctly refused the flat one
+// as "a backup from the old app". Two exports, one of them useless, and no way
+// to tell them apart by looking at the file.
+//
+// So online, the backup IS the server's export - the same thing reset writes
+// before it closes a set of books, and the only thing Import can take back.
 async function exportData() {
   if(!isLoggedIn) { toast('❌ Please log in first.'); return; }
   closeSettings();
   try {
-    const exportObj = buildBackupPayload('manual-export');
+    let exportObj;
+    if(importIsServerSide()) {
+      toast('⏳ Preparing your backup…');
+      exportObj = await KoshWrite.exportShop();
+      if(!exportObj || typeof exportObj !== 'object') {
+        toast('❌ The export came back empty. Nothing was saved.');
+        return;
+      }
+    } else {
+      exportObj = buildBackupPayload('manual-export');
+    }
     const json = JSON.stringify(exportObj, null, 2);
     const dateStr = new Date().toISOString().slice(0,10);
     if(window.MyShopNative && typeof window.MyShopNative.exportBackup === 'function') {
@@ -441,7 +479,179 @@ function updateImportSubtitle(parsed) {
     `Backup from ${dateStr} — ${pCount} products, ${tCount} transactions. Select mode, then enter PIN.`;
 }
 
+// Restoring a backup means replaying six months of history through the posting
+// functions, and two of the things that replay needs are deliberately out of
+// reach of a signed-in browser: creating the pre-migration parties that have no
+// phone, and posting the historical withdrawals that took the drawer negative.
+// Both are service_role only, by decision, so a browser import could only ever
+// produce a partial book that looks complete. It is refused here and explained
+// instead. tools/import-to-supabase.mjs does the real thing, resumably, and
+// reconciles what it wrote against the file it read.
+function importIsServerSide() {
+  return !!(window.KoshWrite && window.KoshApi && window.KoshApi.isConfigured);
+}
+
+// RESTORING A BACKUP
+//
+// The file the app exports is a snapshot of the actual rows (format_version 2),
+// so restoring it is a copy, not a replay - restore_shop_data() does the work in
+// one transaction and either lands the whole file or none of it.
+//
+// It fills an EMPTY set of books. Nothing here deletes: restoring on top of
+// existing entries would double them rather than replace them, so the flow is
+// always the same shape - fresh books, then the file into them. Which is why
+// the old Replace / Merge choice is gone. "Merge" cannot be done safely against
+// a live ledger, and "Replace" is what reset already does, with an export first.
+function describeExport(parsed) {
+  const c = (parsed && parsed.checksums) || {};
+  const parts = [];
+  if (c.products != null) parts.push(c.products + ' products');
+  if (c.sales != null) parts.push(c.sales + ' sales');
+  if (c.purchases != null) parts.push(c.purchases + ' purchases');
+  if (c.payments != null) parts.push(c.payments + ' payments');
+  return parts.length ? parts.join(' · ') : 'a full set of books';
+}
+
+function openRestoreModal(parsed) {
+  const when = parsed.exported_at ? String(parsed.exported_at).slice(0, 10) : 'an unknown date';
+  document.getElementById('importSubtitle').textContent =
+    'Exported ' + when + ' — ' + describeExport(parsed) + '.';
+
+  const desc = document.getElementById('importModeDesc');
+  if (desc) {
+    desc.innerHTML =
+      'This puts the file back exactly as it was — the same bills, the same costs, '
+      + 'the same dues.<br><br>'
+      + '<b>It needs an empty set of books.</b> If the shop you are in already has entries, '
+      + 'run <b>Reset System</b> first: that exports what is there now, opens fresh books, '
+      + 'and keeps the old ones. Then restore into the fresh books.';
+  }
+
+  ['importModeReplace', 'importModeMerge'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = 'none';
+  });
+  const pinRow = document.getElementById('importPinInput');
+  if (pinRow && pinRow.parentElement) pinRow.parentElement.style.display = '';
+  const btn = document.getElementById('importConfirmBtn');
+  if (btn) { btn.style.display = ''; btn.disabled = false; btn.textContent = 'Restore'; }
+  const cancel = document.getElementById('importCancelBtn');
+  if (cancel) { cancel.textContent = 'Cancel'; }
+  document.getElementById('importPinInput').value = '';
+  document.getElementById('importError').textContent = '';
+  document.getElementById('importOverlay').classList.add('active');
+  document.getElementById('importPanel').style.display = 'block';
+  setTimeout(() => document.getElementById('importPinInput')?.focus(), 0);
+}
+
+async function confirmRestore() {
+  const err = document.getElementById('importError');
+  const btn = document.getElementById('importConfirmBtn');
+  const say = (m) => { if (err) err.textContent = m; };
+  const fail = (m) => { say(m); if (btn) btn.disabled = false; };
+
+  if (!pendingImportData) { closeImportModal(); return; }
+  const pin = (document.getElementById('importPinInput')?.value || '').trim();
+  if (!pin) { fail('⚠️ Enter your password'); return; }
+  if (btn) btn.disabled = true;
+  if (!await verifyAdminPinInput(pin)) { fail('❌ Incorrect password'); return; }
+
+  const shopId = KoshWrite.shop();
+  const warned = await appConfirm(
+    'Restore this backup?',
+    'Exported ' + String(pendingImportData.exported_at || '').slice(0, 10) + '\n'
+    + describeExport(pendingImportData) + '\n\n'
+    + 'It will be copied into the books you have open now, which must be empty.\n\n'
+    + 'Your other sets of books are not touched.',
+    { okText: 'Restore' }
+  );
+  if (!warned) { fail(''); return; }
+
+  say('⏳ Restoring… this can take a moment for a large file.');
+  let res;
+  try {
+    res = await KoshWrite.restoreShop(shopId, pendingImportData);
+  } catch (e) {
+    fail(e && e.message ? e.message : '❌ The restore failed. Nothing was changed.');
+    return;
+  }
+
+  // The file carries the counts it was written with, so the copy can be checked
+  // rather than assumed. A mismatch here means something did not come across,
+  // and saying so is the whole reason those numbers are in the file.
+  const want = (pendingImportData.checksums) || {};
+  const got = (res && res.tables) || {};
+  const off = ['sales', 'sale_lines', 'purchases', 'payments', 'products']
+    .filter((k) => want[k] != null && Number(want[k]) !== Number(got[k] || 0))
+    .map((k) => k + ' ' + (got[k] || 0) + '/' + want[k]);
+
+  closeImportModal();
+  await loadData();
+  showPage('dashboard');
+
+  if (off.length) {
+    await appConfirm(
+      '⚠️ Restored, but the counts do not match',
+      'These did not come back in full:\n\n' + off.join('\n')
+      + '\n\nThe file is still on your device. Check the books before entering anything new.',
+      { okText: 'OK', cancelText: 'Close' }
+    );
+  } else {
+    toast('✅ Restored ' + ((res && res.rows_restored) || 0) + ' rows from the backup.', 4000);
+  }
+}
+
+// The OLD app's backup file. Not restorable from here, and the reason is worth
+// stating rather than refusing blankly.
+function explainOldFormatImport(parsed) {
+  const counts = parsed && parsed.data && Array.isArray(parsed.data.products)
+    ? `${parsed.data.products.length} products, ${(parsed.data.transactions || []).length} transactions`
+    : 'this backup';
+  document.getElementById('importSubtitle').textContent =
+    `This is a backup from the old app (${counts}). It cannot be restored from here.`;
+  const desc = document.getElementById('importModeDesc');
+  if(desc) {
+    desc.innerHTML = 'Old files have to be replayed through the posting functions to rebuild '
+      + 'FIFO lots, COGS and the cash ledger. Two steps in that replay are service-role only '
+      + 'and a browser cannot do them: creating the pre-migration parties that have no phone '
+      + 'number, and posting the withdrawals that took the drawer negative.<br><br>'
+      + 'Run this on the computer instead, from the project folder:'
+      + '<div style="margin-top:6px;padding:6px;background:var(--surface);border-radius:5px;'
+      + 'font-family:monospace;font-size:0.68rem;word-break:break-all">npm run import -- --file "your-backup.json" --shop-id &lt;this shop&gt;</div>';
+  }
+  ['importModeReplace', 'importModeMerge', 'importConfirmBtn'].forEach(id => {
+    const el = document.getElementById(id);
+    if(el) el.style.display = 'none';
+  });
+  const pinRow = document.getElementById('importPinInput');
+  if(pinRow && pinRow.parentElement) pinRow.parentElement.style.display = 'none';
+  const cancel = document.getElementById('importCancelBtn');
+  if(cancel) { cancel.style.flex = '1'; cancel.textContent = 'Close'; }
+  document.getElementById('importOverlay').classList.add('active');
+  document.getElementById('importPanel').style.display = 'block';
+}
+
 function openImportModalFromParsed(parsed) {
+  // Two file shapes exist, and telling them apart is the first thing to do.
+  //
+  //   format_version 2  - what this app exports now: the database rows.
+  //   version 1 / 2     - the OLD app's backup: products and transactions in
+  //                       the flat shape the browser used to hold.
+  //
+  // Only the first can be restored. The old shape has to be replayed through
+  // the posting functions to rebuild FIFO and the ledgers, and two steps in
+  // that replay are service-role only - creating the pre-migration parties with
+  // no phone, and the withdrawals that took the drawer negative.
+  if(importIsServerSide()) {
+    if(String(parsed?.format_version || '') === '2') {
+      pendingImportData = parsed;
+      openRestoreModal(parsed);
+    } else {
+      explainOldFormatImport(parsed);
+    }
+    return;
+  }
+
   const ver = Number(parsed?.version || 1);
   if(!Number.isFinite(ver) || ver < 1 || ver > 2) {
     toast('❌ This backup is from an unsupported version and cannot be opened.');
@@ -604,11 +814,14 @@ function repairImportedOverpaidPayments(targetData) {
   return repairs;
 }
 
+// The button's one job is to route: a server-shaped file goes to the restore
+// above, and the old local merge/replace path stays for an offline build.
 async function confirmImport() {
+  if(importIsServerSide()) { return confirmRestore(); }
   const pin = document.getElementById('importPinInput').value.trim();
   const errorEl = document.getElementById('importError');
   if(!pin) { errorEl.textContent = '⚠️ Enter your PIN'; return; }
-  if(await sha256pin(pin) !== userPin && simpleHash(pin) !== userPin) { errorEl.textContent = '❌ Incorrect PIN'; return; }
+  if(!await verifyAdminPinInput(pin)) { errorEl.textContent = '❌ Incorrect password'; return; }
   if(!pendingImportData) { closeImportModal(); return; }
   const chosenMode = importMode; // capture before any async changes
   try {

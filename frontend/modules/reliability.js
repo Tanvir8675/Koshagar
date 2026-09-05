@@ -17,14 +17,9 @@ window.__lastValidDataSnapshot = null;                            // last known-
 // NOTE: debounceAndSave is provided as a TOOL. It is intentionally NOT used to
 // replace the app's awaited saves (runEngineCommand awaits saveData so a save
 // can never be lost mid-close). Use only for non-critical, high-frequency saves.
-function debounceAndSave(delayMs = 1000) {
-  if (window.__saveDebounceTimer) clearTimeout(window.__saveDebounceTimer);
-  window.__savePending = true;
-  window.__saveDebounceTimer = setTimeout(() => {
-    Promise.resolve(typeof saveData === 'function' ? saveData() : null)
-      .finally(() => { window.__savePending = false; window.__saveDebounceTimer = null; });
-  }, delayMs);
-}
+// Removed with saveData(). Nothing used it - the note above says so - and there
+// is no local save left for it to debounce: every write is a posting function
+// in Postgres, awaited, and confirmed before the screen redraws.
 
 function throttle(func, delayMs = 300) {
   let lastRun = 0, scheduled = false, lastArgs = null;

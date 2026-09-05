@@ -259,7 +259,8 @@ function populateOpeningForm() {
 function resetOpenFormFields() {
   editingOpeningId = null;
   cdClear('openProduct');
-  ['openQty', 'openCost', 'openNote', 'openLineVarFactor'].forEach(id => { const e = document.getElementById(id); if(e) e.value = ''; });
+  ['openQty', 'openCost', 'openNote', 'openLineVarFactor',
+   'openSupplier', 'openSupplierPhone'].forEach(id => { const e = document.getElementById(id); if(e) e.value = ''; });
   resetOpeningDiscountInputs();
   setOpeningPriceMode('unit');
   refreshOpeningPurchaseFeatures();
@@ -282,6 +283,7 @@ function toggleOpenSection() {
     sec.style.display = 'none';
     if(typeof setStockBrowseVisible === 'function') setStockBrowseVisible(true);
   }
+  if(typeof syncStockFormButtons === 'function') syncStockFormButtons();
 }
 
 function cancelEditOpening() {
@@ -379,45 +381,45 @@ async function addOpeningStock() {
   if(!Number.isFinite(unitCost) || unitCost < 0) { toast('⚠️ Enter the unit cost'); return; }
   const editing = editingOpeningId;
   if(!(await requireMonthUnlockOverride(date, editing ? 'opening stock edit' : 'opening stock'))) return;
+
+  // Opening stock is an ADJUSTMENT of kind 'opening', not a purchase.
+  //
+  // It looks like a purchase on screen - a product, a quantity, a cost - but no
+  // money changed hands, so it must not touch the drawer. post_adjustment with
+  // kind 'opening' is exactly that: it opens a FIFO lot at the cost given and
+  // writes no cash row at all. load-shop reads it back as a purchase with
+  // opening: 1, which is why the screens below still find it.
+  //
+  // unitCost is per BASE unit (total / qty, where qty is already converted), and
+  // qtyEntered is in the unit the shopkeeper chose - the same split the server
+  // expects, since it recomputes qty_base itself from the conversion.
+  const openingUnit = r.entryUnit || r.baseUnit || (getProd(productId) || {}).unit;
+
   if(editing) {
     await runEngineCommand({
       label: 'updateOpeningStock',
       refresh: 'tx',
       successToast: '✅ Opening stock updated',
-      mutate: async () => {
-        const tx = (data.transactions || []).find(t => String(t.id) === String(editing) && t.type === 'purchase' && t.opening);
-        if(tx) {
-          if(r.setsBase && r.baseUnit) {
-            const prod = getProd(productId);
-            if(prod && prod.id !== '__CAPITAL__') prod.unit = r.baseUnit;
-          }
-          if(r.entryUnit && isContainerUnit(r.entryUnit)) {
-            const prod = getProd(productId);
-            if(prod && prod.id !== '__CAPITAL__') upsertProductAltUnit(prod, r.entryUnit, factor);
-          }
-          tx.productId = productId;
-          tx.qty = qty;
-          tx.price = unitCost;
-          tx.cost = unitCost;
-          tx.entryUnit = r.entryUnit || '';
-          tx.entryFactor = factor;
-          tx.entryQty = entryQty;
-          tx.netUnitCost = unitCost;
-          tx.listUnitPrice = costing.listUnitPrice;
-          tx.discountPercent = costing.discountPercent;
-          tx.discountAmount = costing.discountAmount;
-          tx.landedUnitCost = costing.landedUnitCost;
-          tx.lineExtraCost = costing.lineExtraCost || 0;
-          tx.grossAmount = (costing.listUnitPrice != null) ? round2(costing.listUnitPrice * entryQty) : undefined;
-          tx.discountTotal = (costing.discountAmount != null) ? round2(costing.discountAmount * entryQty) : undefined;
-          tx.netAmount = total;
-          tx.total = total;
-          tx.supplier = supplier;
-          tx.supplierPhone = supplierPhone;
-          tx.note = note;
-          tx.date = toIsoFromLocalDate(date);
-        }
-      },
+      server: async () => KoshWrite.editAdjustment({
+        id: editing,
+        date, kind: 'opening', productId,
+        unit: openingUnit,
+        qtyEntered: entryQty,
+        unitCost,
+        reason: note,
+        // What actually changed, read off the row being corrected - this is the
+        // line printed beside the correction afterwards, so comparing against
+        // zero would make every edit read as if it came from nothing.
+        summary: (() => {
+          const was = (data.transactions || []).find(t => String(t.id) === String(editing));
+          return was ? describeChanges([
+            ['Product', was.productId, productId, id => (getProd(id) || {}).name || '-'],
+            ['Qty', round2(Number(was.qty) || 0), qty, fmt],
+            ['Unit cost', round2(Number(was.cost) || 0), unitCost, fmt],
+            ['Date', dateToYMDLocal(was.date) || '', date]
+          ]) : '';
+        })()
+      }),
       onSuccess: () => {
         cancelEditOpening();
         refreshOpeningStockUiNow();
@@ -429,55 +431,24 @@ async function addOpeningStock() {
       label: 'addOpeningStock',
       refresh: 'tx',
       successToast: '✅ Opening stock recorded',
-      mutate: async () => {
-        const newTxId = makeTimeId('tx');
-        if(r.setsBase && r.baseUnit) {
-          const prod = getProd(productId);
-          if(prod && prod.id !== '__CAPITAL__') prod.unit = r.baseUnit;
-        }
-        if(r.entryUnit && isContainerUnit(r.entryUnit)) {
-          const prod = getProd(productId);
-          if(prod && prod.id !== '__CAPITAL__') upsertProductAltUnit(prod, r.entryUnit, factor);
-        }
-        data.transactions.push({
-          id: newTxId,
-          type: 'purchase',
-          opening: true,
-          returnType: undefined,
-          linkedTxId: undefined,
-          productId,
-          qty,
-          entryUnit: r.entryUnit || '',
-          entryFactor: factor,
-          entryQty,
-          price: unitCost, // keep total = qty × price invariant (validator)
-          netUnitCost: unitCost,
-          listUnitPrice: costing.listUnitPrice,
-          discountPercent: costing.discountPercent,
-          discountAmount: costing.discountAmount,
-          landedUnitCost: costing.landedUnitCost,
-          lineExtraCost: costing.lineExtraCost || 0,
-          grossAmount: (costing.listUnitPrice != null) ? round2(costing.listUnitPrice * entryQty) : undefined,
-          discountTotal: (costing.discountAmount != null) ? round2(costing.discountAmount * entryQty) : undefined,
-          netAmount: total,
-          cost: unitCost,
-          total,
-          cashPaid: 0, // opening stock is not a cash purchase
-          supplier,
-          supplierPhone,
-          customer: '',
-          note,
-          date: toIsoFromLocalDate(date)
-        });
-        auditLog('tx_saved', auditTxContext(data.transactions.find(t => String(t.id) === String(newTxId)), {
-          opening: true,
-          value: total,
-          note
-        }));
-      },
+      server: async () => KoshWrite.postAdjustment({
+        date, kind: 'opening', productId,
+        unit: openingUnit,
+        qtyEntered: entryQty,
+        unitCost,
+        reason: note
+      }),
       onSuccess: () => {
-        const q = document.getElementById('openQty'); if(q) q.value = '';
-        const c = document.getElementById('openCost'); if(c) c.value = '';
+        // THE WHOLE FORM, not just the two number boxes.
+        //
+        // Clearing qty and cost while leaving the product, unit, price mode,
+        // discount, supplier and note filled in is worse than clearing nothing:
+        // the form looks ready for the next entry, so a quantity typed into it
+        // lands against the PREVIOUS product at the previous price. Same reset
+        // the Cancel button uses - a saved entry should leave the form as empty
+        // as an abandoned one.
+        resetOpenFormFields();
+        populateOpeningForm();
         updateOpeningPreview();
         refreshOpeningStockUiNow();
         setTimeout(refreshOpeningStockUiNow, 0);
@@ -495,10 +466,12 @@ async function deleteOpeningStock(id) {
     label: 'deleteOpeningStock',
     refresh: 'tx',
     successToast: '🗑️ Opening stock removed',
-    mutate: async () => {
-      data.transactions = data.transactions.filter(t => !(String(t.id) === String(id) && t.type === 'purchase' && t.opening));
-      auditLog('tx_deleted', auditTxContext(tx, { reason: 'opening_stock_delete' }));
-    },
+    // Reversed as the adjustment it is, not as the purchase it resembles on
+    // screen. The row is not deleted - the opening lot is closed and both
+    // halves stay in the books, like every other correction here.
+    server: async () => KoshWrite.reverse({
+      type: 'adjustment', id, reason: 'Opening stock removed in the app'
+    }),
     onSuccess: () => {
       refreshOpeningStockUiNow();
       setTimeout(refreshOpeningStockUiNow, 0);

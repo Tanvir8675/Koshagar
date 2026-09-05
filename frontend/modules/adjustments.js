@@ -35,6 +35,7 @@ function resetAdjFormFields() {
   const dateEl = document.getElementById('adjDate'); if(dateEl) setAppDateValue(dateEl);
   const typeEl = document.getElementById('adjType'); if(typeEl) typeEl.value = 'damage';
   const btn = document.getElementById('adjSaveBtn'); if(btn) { btn.textContent = 'Record Adjustment'; btn.style.background = 'var(--red)'; }
+  if(typeof onAdjTypeChange === 'function') onAdjTypeChange();
 }
 
 function cancelEditAdjustment() {
@@ -51,11 +52,16 @@ function startEditAdjustment(id) {
   editingAdjustmentId = String(id);
   cdSetValue('adjProduct', tx.productId);
   const set = (elId, val) => { const e = document.getElementById(elId); if(e) e.value = val; };
-  set('adjType', tx.adjustmentType || 'damage');
+  // The database's word for it is not always the form's word: correction_out is
+  // simply "Correction" on screen. Without the translation the select fell
+  // through to its first option, so editing a correction offered to record it
+  // as Damage - and saving would have changed what the adjustment WAS.
+  set('adjType', adjustmentTypeForForm(tx.adjustmentType));
   set('adjQty', tx.qty);
   set('adjValue', tx.cost);
   setAppDateValue('adjDate', tx.date);
   set('adjNote', tx.note || '');
+  if(typeof onAdjTypeChange === 'function') onAdjTypeChange();
   const btn = document.getElementById('adjSaveBtn'); if(btn) { btn.textContent = '✔ Update Adjustment'; btn.style.background = 'var(--blue)'; }
   sec?.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
@@ -78,9 +84,10 @@ function renderAdjustmentList() {
       <div>
         <div style="font-size:0.82rem;font-weight:600">${escapeHtml(p?.name || String(t.productId))} · ${escapeHtml(label)}</div>
         <div style="font-size:0.68rem;color:var(--ink2)">${displayDateTime(t.date) || dateToYMDLocal(t.date)} · qty ${fmt(t.qty)}${t.note ? ` · ${escapeHtml(t.note)}` : ''}</div>
+        ${txEditNote(t)}
       </div>
       <div style="display:flex;align-items:center;gap:6px">
-        <span style="font-family:'Instrument Serif',serif;font-size:0.95rem;color:var(--red)">-${fmt(Number.isFinite(Number(t.total)) && Number(t.total) > 0 ? round2(t.total) : round2((Number(t.cost) || 0) * (Number(t.qty) || 0)))}</span>
+        <span style="font-family:'Instrument Serif',serif;font-size:0.95rem;color:${t.adjustmentType === 'correction_in' ? 'var(--green)' : 'var(--red)'}">${t.adjustmentType === 'correction_in' ? '+' : '-'}${fmt(Number.isFinite(Number(t.total)) && Number(t.total) > 0 ? round2(t.total) : round2((Number(t.cost) || 0) * (Number(t.qty) || 0)))}</span>
         <button onclick="startEditAdjustment('${t.id}')" style="background:none;border:none;color:var(--blue);font-size:0.95rem;cursor:pointer;padding:3px 6px;border-radius:6px;opacity:0.75" title="Edit">✏️</button>
         <button onclick="deleteStockAdjustment('${t.id}')" class="del-btn" style="font-size:0.8rem;padding:3px 7px">🗑</button>
       </div>
@@ -88,9 +95,54 @@ function renderAdjustmentList() {
   }).join('');
 }
 
+// The form asks for two numbers whose meaning flips with the type: for a
+// write-off they describe goods leaving and what that cost; for found stock they
+// describe goods arriving and what they are worth. Leaving the labels saying
+// "removed" while adding stock is how a shopkeeper records the opposite of what
+// they meant.
+function onAdjTypeChange() {
+  const adding = (document.getElementById('adjType')?.value || '') === 'correction_in';
+  const qtyLabel = document.getElementById('adjQtyLabel');
+  const valLabel = document.getElementById('adjValueLabel');
+  const saveBtn = document.getElementById('adjSaveBtn');
+  if(qtyLabel) qtyLabel.textContent = adding ? 'Quantity found (added to stock)' : 'Quantity removed';
+  if(valLabel) {
+    valLabel.textContent = adding
+      ? 'Cost per unit (what these goods cost you — they enter stock at this price)'
+      : 'Value per unit (your loss valuation — old or new price)';
+  }
+  // Green for stock coming in, red for stock going out. The button is the last
+  // thing looked at before saving.
+  if(saveBtn) saveBtn.style.background = adding ? 'var(--green)' : 'var(--red)';
+}
+
+// What the screen calls it, and what the database calls it.
+//
+// 'correction' on its own is a decrease - that is what the form has always
+// meant by it, and renaming the option would silently reinterpret every
+// adjustment already recorded. The increase is its own kind.
+// The reverse: what the form should show for an adjustment already recorded.
+function adjustmentTypeForForm(kind) {
+  const k = String(kind || '');
+  if(k === 'correction_out') return 'correction';
+  if(k === 'correction_in')  return 'correction_in';
+  return (k === 'damage' || k === 'theft') ? k : 'damage';
+}
+
+function adjustmentKindFor(type) {
+  if(type === 'correction') return 'correction_out';
+  if(type === 'correction_in') return 'correction_in';
+  return type;                       // damage and theft: the same word both sides
+}
+
+// Does this kind put goods ON the shelf? Only one does, but asking the question
+// by name is clearer than testing the string in four places.
+const adjustmentAddsStock = (kind) => kind === 'correction_in';
+
 async function addStockAdjustment() {
   const productId = document.getElementById('adjProduct')?.value;
   const type = document.getElementById('adjType')?.value || 'damage';
+  const kind = adjustmentKindFor(type);
   const qty = round2(parseFloat(document.getElementById('adjQty')?.value));
   const unitValue = round2(parseFloat(document.getElementById('adjValue')?.value));
   const date = readAppDateValue('adjDate');
@@ -101,66 +153,70 @@ async function addStockAdjustment() {
   const editing = editingAdjustmentId;
   if(!(await requireMonthUnlockOverride(date, editing ? 'stock adjustment edit' : 'stock adjustment'))) return;
   const oldTx = editing ? (data.transactions || []).find(t => String(t.id) === String(editing) && t.type === 'adjustment') : null;
-  let available = getStock(productId);
-  // When editing the same product, add its existing removal back before the cap check.
-  if(oldTx && String(oldTx.productId) === String(productId)) available = round2(available + (Number(oldTx.qty) || 0));
-  if(qty > available + 0.0001) {
-    toast(`⚠️ Only ${fmt(available)} in stock — cannot remove ${fmt(qty)}`);
-    return;
+  // The stock cap applies only when goods are LEAVING. Found stock is not
+  // limited by what the books already show - the whole point of recording it is
+  // that the books were short.
+  if(!adjustmentAddsStock(kind)) {
+    let available = getStock(productId);
+    // When editing the same product, add its existing removal back before the cap check.
+    if(oldTx && String(oldTx.productId) === String(productId)
+       && String(oldTx.adjustmentType || '') !== 'correction_in') {
+      available = round2(available + (Number(oldTx.qty) || 0));
+    }
+    if(qty > available + 0.0001) {
+      toast(`⚠️ Only ${fmt(available)} in stock — cannot remove ${fmt(qty)}`);
+      return;
+    }
   }
   if(editing) {
     await runEngineCommand({
       label: 'updateStockAdjustment',
       refresh: 'both',
       successToast: '✅ Adjustment updated',
-      mutate: async () => {
-        const tx = (data.transactions || []).find(t => String(t.id) === String(editing) && t.type === 'adjustment');
-        if(tx) {
-          tx.productId = productId;
-          tx.adjustmentType = type;
-          tx.qty = qty;
-          tx.price = unitValue;
-          tx.cost = unitValue;
-          tx.total = round2(qty * unitValue);
-          tx.note = note;
-          tx.date = toIsoFromLocalDate(date);
-        }
-      },
+      // The database puts the written-off stock back and takes the corrected
+      // quantity out again, in one transaction - so the shelf, the stock value
+      // and the loss reported for the day all move together.
+      server: () => KoshWrite.editAdjustment({
+        id: editing,
+        date,
+        kind,
+        productId,
+        unit: (getProd(productId) || {}).unit,
+        qtyEntered: Math.abs(qty),
+        unitCost: unitValue,
+        reason: note,
+        summary: describeChanges([
+          ['Product', oldTx && oldTx.productId, productId, id => (getProd(id) || {}).name || '-'],
+          ['Type', String((oldTx && oldTx.adjustmentType) || ''), type],
+          ['Qty', round2(Number(oldTx && oldTx.qty) || 0), qty, fmt],
+          ['Value/unit', round2(Number(oldTx && oldTx.cost) || 0), unitValue, fmt],
+          ['Date', dateToYMDLocal(oldTx && oldTx.date) || '', date]
+        ])
+      }),
       onSuccess: () => cancelEditAdjustment()
     });
   } else {
     await runEngineCommand({
       label: 'addStockAdjustment',
       refresh: 'both',
-      successToast: '✅ Stock adjustment recorded',
-      mutate: async () => {
-        const newTxId = makeTimeId('tx');
-        data.transactions.push({
-          id: newTxId,
-          type: 'adjustment',
-          adjustmentType: type,
-          returnType: undefined,
-          linkedTxId: undefined,
-          productId,
-          qty,
-          price: unitValue, // keep total = qty × price invariant (validator); also the loss value
-          cost: unitValue,
-          total: round2(qty * unitValue),
-          cashPaid: 0,
-          supplier: '',
-          customer: '',
-          note,
-          date: toIsoFromLocalDate(date)
-        });
-        auditLog('tx_saved', auditTxContext(data.transactions.find(t => String(t.id) === String(newTxId)), {
-          adjustmentType: type,
-          value: round2(qty * unitValue),
-          note
-        }));
-      },
+      successToast: adjustmentAddsStock(kind)
+      ? '✅ Stock increase recorded'
+      : '✅ Stock adjustment recorded',
+      server: () => KoshWrite.postAdjustment({
+        date,
+        kind,
+        productId,
+        unit: (getProd(productId) || {}).unit,
+        qtyEntered: Math.abs(qty),
+        unitCost: unitValue,
+        reason: note
+      }),
       onSuccess: () => {
-        const q = document.getElementById('adjQty'); if(q) q.value = '';
-        const n = document.getElementById('adjNote'); if(n) n.value = '';
+        // The whole form, for the same reason as opening stock: a half-cleared
+        // form still names a product, and the next quantity typed into it goes
+        // to that one.
+        resetAdjFormFields();
+        populateAdjustForm();
       }
     });
   }
@@ -175,10 +231,7 @@ async function deleteStockAdjustment(id) {
     label: 'deleteStockAdjustment',
     refresh: 'both',
     successToast: '🗑️ Adjustment removed',
-    mutate: async () => {
-      data.transactions = data.transactions.filter(t => !(String(t.id) === String(id) && t.type === 'adjustment'));
-      auditLog('tx_deleted', auditTxContext(tx, { reason: 'stock_adjustment_delete' }));
-    }
+    server: () => KoshWrite.reverse({ type: 'adjustment', id, reason: 'Removed in the app' }),
   });
 }
 // ── END STOCK ADJUSTMENTS ────────────────────────────────────────

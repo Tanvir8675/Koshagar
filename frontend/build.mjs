@@ -60,25 +60,34 @@ const obf = (code) => JavaScriptObfuscator
   .obfuscate(code, { ...OBFUSCATE_OPTS, identifiersPrefix: `_ko${__obfSeq++}_` })
   .getObfuscatedCode();
 
-// External JS to obfuscate (relative paths, mirrored into dist/).
-const JS_FILES = [
-  'app.js',
-  'config.js',
-  'calc/financial.js',
-  'db/sqlite.js',
-  'ui/tx-render.js',
-  'ui/dashboard.js',
-  'modules/cashbook.js',
-  'modules/adjustments.js',
-  'modules/inventory.js',
-  'modules/reports.js',
-  'modules/invoice.js',
-  'modules/payments.js',
-  'modules/credit-page.js',
-  'modules/entry-cart.js',
-  'modules/backup.js',
-  'modules/reliability.js'
-];
+// WHAT TO SHIP IS READ FROM index.html, NOT LISTED HERE.
+//
+// This used to be a hand-written list, and it had gone out of date in the worst
+// possible way: the five files of the Supabase layer - data/supabase-api.js,
+// data/auth.js, data/load-shop.js, data/write-shop.js and data/server-totals.js
+// - were added to index.html and never added here. The build succeeded, said
+// nothing, and produced a dist/ whose index.html asks for five scripts that are
+// not in the folder. Deployed, that is an app which cannot sign in, cannot read
+// a shop and cannot write a document - and no line of the build output would
+// have hinted at it.
+//
+// A list that has to be kept in step with another list eventually will not be.
+// So the page itself is the list: every <script src> in index.html is shipped,
+// and the check at the end of run() refuses to call it a build if one of them
+// did not make it into dist/.
+async function scriptsFrom(htmlPath) {
+  const html = await fs.readFile(htmlPath, 'utf8');
+  const found = [];
+  const re = /<script[^>]+src=["']([^"']+)["']/gi;
+  let m;
+  while ((m = re.exec(html))) {
+    const src = m[1].replace(/^\.\//, '');
+    if (/^(https?:)?\/\//.test(src)) continue;   // not ours to obfuscate
+    if (src.startsWith('vendor/')) continue;     // third-party, copied verbatim
+    if (!found.includes(src)) found.push(src);
+  }
+  return found;
+}
 
 async function writeOut(rel, content) {
   const dest = path.join(DIST, rel);
@@ -90,7 +99,9 @@ async function run() {
   await fs.rm(DIST, { recursive: true, force: true });
   await fs.mkdir(DIST, { recursive: true });
 
-  // 1) External JS modules
+  // 1) External JS modules - exactly the ones index.html asks for.
+  const JS_FILES = await scriptsFrom(path.join(ROOT, 'index.html'));
+  console.log(`index.html asks for ${JS_FILES.length} script file(s)`);
   for (const rel of JS_FILES) {
     const src = await fs.readFile(path.join(ROOT, rel), 'utf8');
     await writeOut(rel, obf(src));
@@ -137,6 +148,19 @@ async function run() {
     for (const f of vendor) await fs.copyFile(path.join(ROOT, 'vendor', f), path.join(DIST, 'vendor', f));
     console.log(`copied vendor/ (${vendor.length} file(s))`);
   } catch (_) {}
+
+  // 5) Refuse to call it a build if the page would 404 on its own code.
+  const missing = [];
+  for (const rel of JS_FILES) {
+    try { await fs.access(path.join(DIST, rel)); }
+    catch (_) { missing.push(rel); }
+  }
+  if (missing.length) {
+    console.error('\nBUILD INCOMPLETE - index.html loads these and they are not in dist/:');
+    missing.forEach((f) => console.error('   ' + f));
+    process.exitCode = 1;
+    return;
+  }
 
   console.log('\n✅ Build complete → frontend/dist/');
   console.log('   Deploy the frontend/dist/ folder (firebase.json public is set to "frontend/dist").');
