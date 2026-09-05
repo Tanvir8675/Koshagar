@@ -8272,17 +8272,41 @@ function __reconcileDataConsistencyImpl() {
     if(t.type === 'capital-in' && (t.relatedPurchaseTxId || t.relatedBillId)) {
       delete t.seedOpening;
     }
-    t.qty = round2(Math.abs(Number(t.qty) || 0));
+    // THE RECORDED AMOUNT IS THE AMOUNT. IT IS NOT RE-DERIVED HERE.
+    //
+    // This used to round the quantity to 2 decimals, round the unit price to 2
+    // decimals, and then rebuild the line's total by multiplying the two - for
+    // every sale that had no bill discount. The database does not store a total
+    // it can be talked out of: line_total is a generated column,
+    // round(qty_base * unit_price, 2), written once when the document was
+    // posted. Rebuilding it from twice-rounded inputs can only move it.
+    //
+    // And it moved. 3,100.00 over 7 units is 442.857142...; rounded to 442.86
+    // and multiplied back it is 3,100.02. Two paisa the customer never owed.
+    // Across sixty-nine open bills the drift came to 0.24 - small, and going
+    // the same way every time a rate does not divide cleanly, which is exactly
+    // how a rounding error stops being harmless.
+    //
+    // Quantity is numeric(18,3) in the database, so rounding it to 2 decimals
+    // was throwing away a digit the books actually keep - half a kilo entered
+    // as 0.125 came back as 0.13. It is kept to 3 now, and the price to the
+    // same 6 decimals the discounted and purchase paths already used, so a rate
+    // times a quantity reconciles to the recorded amount instead of replacing
+    // it.
+    const round3 = (v) => Math.round((Number(v) || 0) * 1000) / 1000;
+    t.qty = round3(Math.abs(Number(t.qty) || 0));
     const rawPrice = Number(t.price) || 0;
     const hasBillDiscount = !!t.billId && Math.abs(Number(t.lineDiscount) || 0) > 0;
     const isPurchase = t.type === 'purchase';
     const originalStoredTotal = round2(Number(t.total) || 0);
     const originalCashPaid = t.cashPaid === undefined ? originalStoredTotal : round2(Number(t.cashPaid) || 0);
-    t.price = (hasBillDiscount || isPurchase) ? Number(rawPrice.toFixed(6)) : round2(rawPrice);
+    t.price = Number(rawPrice.toFixed(6));
     t.cost = round2(Number(t.cost) || 0);
     const purchaseStoredTotal = round2(Number(t.netAmount) || Number(t.total) || 0);
     const rawTotal = isPurchase ? purchaseStoredTotal : round2(Number(t.total) || 0);
-    t.total = (isPurchase || (hasBillDiscount && rawTotal > 0)) ? rawTotal : round2(t.qty * t.price);
+    // A recorded total always wins. The multiplication is only for a row that
+    // never carried one.
+    t.total = rawTotal > 0 ? rawTotal : round2(t.qty * t.price);
     if(isPurchase && t.qty > 0 && t.total > 0 && Math.abs(round2(t.qty * t.price) - t.total) > 0.01) {
       t.price = Number((t.total / t.qty).toFixed(6));
       if(!(Number(t.netUnitCost) > 0)) t.netUnitCost = t.price;
