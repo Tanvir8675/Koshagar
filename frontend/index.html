@@ -1004,6 +1004,12 @@ input:checked + .toggle-slider:before { transform: translateX(18px); }
       <button type="button" onclick="handleVerifyOtp()">Verify</button>
       <div class="login-setup">
         <button type="button" onclick="handleResendOtp()" style="margin-top:8px;display:block">Send the email again</button>
+        <!-- A WAY OUT. The tabs are hidden on this pane, so without this the
+             only ways off the verify screen were to finish it or to reload the
+             page - and someone who mistyped their email had neither. The
+             account already exists, unverified: signing in tells them to check
+             their email, and signing up again with the right address works. -->
+        <button type="button" onclick="showAuthTab('in')" style="margin-top:8px;display:block">Back to sign in</button>
       </div>
     </div>
 
@@ -1033,6 +1039,9 @@ input:checked + .toggle-slider:before { transform: translateX(18px); }
       <input type="password" id="npNew" placeholder="New password (at least 6 characters)" autocomplete="new-password">
       <input type="password" id="npConfirm" placeholder="Confirm new password" autocomplete="new-password">
       <button type="button" id="npSaveBtn" onclick="handleSetNewPassword()">Save and sign in</button>
+      <div class="login-setup">
+        <button type="button" onclick="showAuthTab('in')" style="margin-top:8px;display:block">Back to sign in</button>
+      </div>
     </div>
 
     <div class="login-error" id="loginError"></div>
