@@ -176,16 +176,43 @@ window.KoshAuth = (function () {
   // ---------------------------------------------------------------------
   // Passwords
   // ---------------------------------------------------------------------
-  // Always resolves. Confirming whether an address is registered would let
-  // anyone test emails against the shop.
+  // SILENT ABOUT WHO EXISTS, NOT ABOUT WHETHER IT WORKED.
+  //
+  // This used to swallow every error and say "sent" regardless. The reason for
+  // the silence is sound - confirming that an address is registered would let
+  // anyone test emails against the shop - but it was applied to failures that
+  // reveal nothing about the address at all. When the mail service refuses
+  // (rate limit, SMTP not configured, provider down) the screen still said the
+  // code was on its way, and the person sat waiting for an email that was never
+  // going to arrive, then blamed their inbox.
+  //
+  // Supabase's own email service allows only a couple of messages an hour, so a
+  // 429 here is common and is the single likeliest reason a code "never came".
+  //
+  // The rule that survives: a 400 or 422 can only mean "no such address" or
+  // something specific to it, so those keep the vague answer. Anything else -
+  // 429, 5xx, no network at all - is about the SERVICE and is said plainly.
   async function requestPasswordReset(identifier) {
     const email = await resolveIdentifier(identifier);
-    if (email) {
-      try {
-        await authFetch(`/recover?redirect_to=${encodeURIComponent(hereUrl())}`, { body: { email } });
-      } catch (_) { /* never reveal whether the address exists */ }
+    if (!email) {
+      return { ok: true, message: '📧 If that account exists, a code has been sent to its email.' };
     }
-    return { ok: true, message: '📧 If that account exists, a reset link has been sent to its email.' };
+    try {
+      await authFetch(`/recover?redirect_to=${encodeURIComponent(hereUrl())}`, { body: { email } });
+      return { ok: true, message: '📧 If that account exists, a code has been sent to its email.' };
+    } catch (err) {
+      const status = Number(err && err.status) || 0;
+      if (status === 400 || status === 422) {
+        return { ok: true, message: '📧 If that account exists, a code has been sent to its email.' };
+      }
+      if (status === 429) {
+        const wait = /after (\d+) seconds?/i.exec(String(err.raw || ''));
+        throw new Error(wait
+          ? `⏳ Too many requests. Wait ${wait[1]} seconds and try again.`
+          : '⏳ Too many reset emails have been sent from this account recently. Wait a few minutes and try again.');
+      }
+      throw new Error('❌ The email could not be sent right now — this is the mail service, not your account. Try again in a few minutes.');
+    }
   }
 
   // Re-check the signed-in user's password for a sensitive action inside the
