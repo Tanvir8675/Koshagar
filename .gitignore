@@ -19,3 +19,12 @@ backups/
 # Editor / OS
 .DS_Store
 Thumbs.db
+
+# Secrets — the service key must never be committed. Keep it in .env.local,
+# which the import command reads without it ever appearing on screen.
+.env
+.env.*
+!.env.example
+
+# Customer backups handed over for import — real shop data, not ours to keep in git.
+import-data/
