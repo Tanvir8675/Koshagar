@@ -1962,13 +1962,21 @@ input:checked + .toggle-slider:before { transform: translateX(18px); }
       <div id="purchaseDiscountSummary" style="font-size:0.8rem;font-weight:700;color:var(--green);margin:-2px 0 8px"></div>
     </div>
     <div class="form-group"><label id="ePriceLbl">Sell Price per Unit ৳</label><input type="number" id="ePrice" placeholder="0.00" step="0.01" oninput="updatePreview();updateSellPriceHint()"></div>
-    <!-- Shopkeeper's note. Never printed, never on an invoice, never shown to a
-         customer: the invoice is built from the saved document, not from this
-         form, so nothing here can reach it. -->
-    <div id="sellPriceHint" style="display:none;font-size:0.76rem;line-height:1.5;color:var(--ink2);background:var(--surface2);border-left:3px solid var(--gold);border-radius:6px;padding:7px 10px;margin:-6px 0 12px"></div>
+
     <div class="form-group" id="landedCostRow" style="display:none"><label>Extra Costing ৳ (transport, others — cash out)</label><input type="number" id="eLandedCost" placeholder="0.00" step="0.01" min="0" oninput="updatePreview()"></div>
     <div class="form-group"><label>Date</label><input type="date" id="eDate" class="app-date-input" onchange="updatePurchaseFundingPreview()"></div>
-    <div class="form-group" id="costRow" style="display:none"><label>Cost Price per Unit ৳ (auto)</label><input type="number" id="eCost" placeholder="0.00" step="0.01" readonly style="background:var(--surface2);cursor:not-allowed"></div>
+    <div class="form-group" id="costRow" style="display:none">
+      <label id="eCostLbl">Company Price per Unit ৳ (auto)
+        <!-- The clue. Everything a customer must not read sits behind it: what
+             the goods actually cost and how far the price can come down. Shown
+             only when the shopkeeper asks, so a phone turned round at the
+             counter gives nothing away. -->
+        <button type="button" id="costClueBtn" onclick="toggleCostClue()" title="Show your cost and discount room"
+                style="display:none;margin-left:6px;width:18px;height:18px;padding:0;border:none;border-radius:50%;background:var(--green);color:#fff;font-family:inherit;font-weight:700;font-size:0.72rem;line-height:18px;text-align:center;cursor:pointer;vertical-align:middle">!</button>
+      </label>
+      <input type="number" id="eCost" placeholder="0.00" step="0.01" readonly style="background:var(--surface2);cursor:not-allowed">
+      <div id="costClue" style="display:none;font-size:0.76rem;line-height:1.5;color:var(--ink2);background:var(--surface2);border-left:3px solid var(--green);border-radius:6px;padding:7px 10px;margin-top:6px"></div>
+    </div>
     <div class="form-group" id="saleCustomerRow" style="display:none"><label>Customer Name *</label><div class="party-suggest-wrap"><input type="text" id="eSaleCustomer" placeholder="Customer name" autocomplete="off" oninput="showPartySuggest('sgSaleName','eSaleCustomer','eSaleCustomerPhone','customer','name',this.value)" onblur="setTimeout(()=>hidePartySuggest('sgSaleName'),150)"><div id="sgSaleName" class="party-suggest-panel"></div></div></div>
     <div class="form-group" id="saleCustomerPhoneRow" style="display:none"><label>Customer Phone (Required for Due)</label><div class="party-suggest-wrap"><input type="text" id="eSaleCustomerPhone" placeholder="01XXXXXXXXX" inputmode="numeric" autocomplete="off" oninput="this.value=this.value.replace(/[^0-9+]/g,'');showPartySuggest('sgSalePhone','eSaleCustomer','eSaleCustomerPhone','customer','phone',this.value)" onblur="setTimeout(()=>hidePartySuggest('sgSalePhone'),150)"><div id="sgSalePhone" class="party-suggest-panel"></div></div></div>
     <div class="form-group" id="supplierRow" style="display:none"><label>Supplier Name *</label><div class="party-suggest-wrap"><input type="text" id="eSupplier" placeholder="Supplier name" autocomplete="off" oninput="showPartySuggest('sgSuppName','eSupplier','eSupplierPhone','supplier','name',this.value)" onblur="setTimeout(()=>hidePartySuggest('sgSuppName'),150)"><div id="sgSuppName" class="party-suggest-panel"></div></div></div>
@@ -2584,6 +2592,7 @@ const PHRASE_BN = {
   "Selling Price ৳": "বিক্রয়মূল্য ৳",
   "Purchase Price": "ক্রয়মূল্য",
   "Cost Price per Unit ৳ (auto)": "প্রতি এককের ক্রয়মূল্য ৳ (স্বয়ংক্রিয়)",
+  "Company Price per Unit ৳ (auto)": "প্রতি এককের কোম্পানি দাম ৳ (স্বয়ংক্রিয়)",
   "Cost per unit": "প্রতি এককের খরচ",
   "Unit cost (purchase price)": "একক খরচ (ক্রয়মূল্য)",
   "Actual Cost": "প্রকৃত খরচ",
@@ -10983,46 +10992,77 @@ function lastPurchasePricing(productId) {
   return { list, net, discountPct: pct, date: t.localDate || t.date };
 }
 
-function updateSellPriceHint() {
-  const el = document.getElementById('sellPriceHint');
-  if(!el) return;
-  const hide = () => { el.style.display = 'none'; el.innerHTML = ''; };
-  if(entryType !== 'sale') return hide();
-  const p = getProd(document.getElementById('eProduct')?.value);
-  if(!p) return hide();
-  const pr = lastPurchasePricing(p.id);
-  if(!pr) return hide();
+let __costClueOpen = false;
 
-  // Quoted per the unit the sale is being entered in, so the two figures on the
-  // screen are in the same basis - a per-COIL price beside a per-yard cost is
-  // how a rate gets read as the wrong number.
+function toggleCostClue() {
+  __costClueOpen = !__costClueOpen;
+  updateSellPriceHint();
+}
+
+// The reference row: what the company charges, and - only when asked - what the
+// goods cost and how far down the price can go.
+//
+// The visible figure is the COMPANY price, because that is the number being
+// quoted to a customer. The cost sits behind the clue button with the discount
+// room, since those two together are the shop's margin and nobody standing at
+// the counter needs to see them.
+function updateSellPriceHint() {
+  const row = document.getElementById('costRow');
+  const field = document.getElementById('eCost');
+  const btn = document.getElementById('costClueBtn');
+  const clue = document.getElementById('costClue');
+  const lbl = document.getElementById('eCostLbl');
+  if(!row || !field) return;
+
+  const hideClue = () => {
+    if(btn) btn.style.display = 'none';
+    if(clue) { clue.style.display = 'none'; clue.innerHTML = ''; }
+  };
+  if(entryType !== 'sale') return hideClue();
+
+  const p = getProd(document.getElementById('eProduct')?.value);
+  if(!p) return hideClue();
+  const pr = lastPurchasePricing(p.id);
+
   let f = 1;
   try { if(typeof getEntryUnitConversion === 'function') f = Number(getEntryUnitConversion(p.id).factor) || 1; }
   catch(_) { f = 1; }
   const unit = (typeof getEntryUnitConversion === 'function')
     ? (getEntryUnitConversion(p.id).unit || p.unit || '') : (p.unit || '');
-  const listPer = round2(pr.list * f);
+
+  // The field itself: the company price where one is known, and the plain cost
+  // where it is not - a shop with no recorded company price is better served by
+  // the cost it does have than by a blank box.
+  const costPer = round2(Number(field.dataset.fifoPerUnit) || 0);
+  const listPer = pr && pr.list > 0 ? round2(pr.list * f) : 0;
+  const known = listPer > 0 && pr && pr.discountPct > 0;
+  if(listPer > 0) field.value = listPer;
+  if(lbl) {
+    const text = known ? 'Company Price per Unit ৳ (auto)' : 'Cost Price per Unit ৳ (auto)';
+    lbl.childNodes[0].nodeValue = trPhrase(text) + ' ';
+  }
+
+  if(!pr) return hideClue();
+  if(btn) btn.style.display = 'inline-block';
+  if(!clue) return;
+  if(!__costClueOpen) { clue.style.display = 'none'; return; }
 
   const typed = parseFloat(document.getElementById('ePrice')?.value);
-  const given = (Number.isFinite(typed) && listPer > 0 && typed < listPer)
-    ? round2((listPer - typed) / listPer * 100) : 0;
-
-  // Over the room the purchase discount bought, every further taka is the
-  // shop's own money. Said plainly, and only when it is actually happening.
+  const base = listPer > 0 ? listPer : costPer;
+  const given = (Number.isFinite(typed) && base > 0 && typed < base)
+    ? round2((base - typed) / base * 100) : 0;
   const over = pr.discountPct > 0 && given > pr.discountPct + 0.01;
-  const room = pr.discountPct > 0
-    ? `Room to discount: <b>up to ${fmt(pr.discountPct)}%</b> (৳${fmt(round2(listPer * (1 - pr.discountPct / 100)))} floor)`
-    : 'No supplier discount recorded on the last purchase — every taka off is your own margin.';
-  const now = given > 0.01
-    ? `<br>You are giving <b>${fmt(given)}%</b>.`
-    : '';
-  el.innerHTML =
-    `🏷️ Company price <b>৳${fmt(listPer)}</b>/${escapeHtml(String(unit))}`
-    + (pr.discountPct > 0 ? ` · bought at <b>${fmt(pr.discountPct)}% off</b>` : '')
-    + `<br>${room}${now}`
-    + (over ? '<br><span style="color:var(--red);font-weight:700">⚠️ Past your own discount — this sale is below cost.</span>' : '');
-  el.style.borderLeftColor = over ? 'var(--red)' : 'var(--gold)';
-  el.style.display = 'block';
+  const floor = listPer > 0 ? round2(listPer * (1 - pr.discountPct / 100)) : costPer;
+
+  clue.innerHTML =
+    (pr.discountPct > 0
+      ? `Discount room: <b>up to ${fmt(pr.discountPct)}%</b> \u2014 floor \u09f3${fmt(floor)}/${escapeHtml(String(unit))}`
+      : 'No supplier discount recorded \u2014 every taka off is your own margin.')
+    + `<br>Your cost: <b>\u09f3${fmt(costPer)}</b>/${escapeHtml(String(unit))}`
+    + (given > 0.01 ? `<br>Giving <b>${fmt(given)}%</b> now.` : '')
+    + (over ? '<br><span style="color:var(--red);font-weight:700">\u26a0\ufe0f Past your discount \u2014 below cost.</span>' : '');
+  clue.style.borderLeftColor = over ? 'var(--red)' : 'var(--green)';
+  clue.style.display = 'block';
 }
 
 function onProductChange() {
@@ -11041,9 +11081,11 @@ function onProductChange() {
     // total (never rate × factor, which magnifies the rate's rounding error by the
     // factor: 1 COIL = 109 yards bought for 2900 must read 2900.00, not 2900.49).
     const q = quoteFifoSaleCost(p.id, baseQ, saleDate, 0);
-    document.getElementById('eCost').value = q.usedQty > 0
-      ? round2((q.totalCost * f) / q.usedQty)
-      : 0;
+    // The real FIFO cost is kept on the element, not in it: the box shows the
+    // company price, and the cost belongs behind the clue button.
+    const costEl = document.getElementById('eCost');
+    costEl.dataset.fifoPerUnit = q.usedQty > 0 ? round2((q.totalCost * f) / q.usedQty) : 0;
+    costEl.value = costEl.dataset.fifoPerUnit;
   }
   // Product defaults: purchase pre-fills the company/list price (then derives net);
   // sale pre-fills the selling price. Both remain editable.
@@ -11059,18 +11101,10 @@ function onProductChange() {
     const priceEl = document.getElementById('ePrice');
     if(priceEl && !priceEl.value) priceEl.value = round2(p.defaultSellingPrice);
   }
-  // No selling price set for this product: open at the COMPANY price from the
-  // last purchase, not at what the shop paid for it. See lastPurchasePricing().
-  if (p && entryType==='sale') {
-    const priceEl = document.getElementById('ePrice');
-    const pr = lastPurchasePricing(p.id);
-    if(priceEl && !priceEl.value && pr && pr.list > 0) {
-      let f = 1;
-      try { if(typeof getEntryUnitConversion === 'function') f = Number(getEntryUnitConversion(p.id).factor) || 1; }
-      catch(_) { f = 1; }
-      priceEl.value = round2(pr.list * f);
-    }
-  }
+  // The sell price is NOT filled in for you. A number already in the box is a
+  // number that gets accepted without being looked at, and the price a shop
+  // charges is a decision, not a default. What the reference row below shows is
+  // the company price - so the figure to type is right there to read.
   updateSellPriceHint();
   updatePreview();
 }
@@ -11101,9 +11135,14 @@ function updatePreview() {
     const costQuote = quoteFifoSaleCost(p.id, qtyForCost, saleDate, 0);
     cost = costQuote.unitCost || 0;
     costTotal = baseQty > 0 ? round2(costQuote.totalCost || 0) : 0;
-    document.getElementById('eCost').value = costQuote.usedQty > 0
+    const costEl = document.getElementById('eCost');
+    costEl.dataset.fifoPerUnit = costQuote.usedQty > 0
       ? round2((costQuote.totalCost * factor) / costQuote.usedQty)
       : 0;
+    costEl.value = costEl.dataset.fifoPerUnit;
+    // Puts the company price back in the box and refreshes the clue, so the
+    // quantity or the unit changing cannot leave a stale rate on screen.
+    if(typeof updateSellPriceHint === 'function') updateSellPriceHint();
   }
   const box = document.getElementById('preview');
   if (!p||qty<=0){box.style.display='none';updatePurchaseFundingPreview();return;}
