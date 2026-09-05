@@ -12275,10 +12275,24 @@ function memoCurrentDue(key, value) {
   return value;
 }
 
+// THE REFUND TERM WAS THE OTHER HALF OF THE RETURN BUG, AND IT HAD TO GO TOO.
+//
+// While a credit's total was being rebuilt with the return already netted out,
+// the cash refunded had to be added back or it would have been subtracted
+// twice. Now the total is the sale's own value and the return is its own
+// document, exactly as post_return() records it - so adding the refund back
+// inflates the debt by the very money that was handed over.
+//
+// Measured: it read 45,945.54 against the database's 45,424.66, over by 520.64,
+// which is the cash refunded on the seven returns still standing against unpaid
+// bills. The same number, from the other side.
+//
+// A return no longer touches this figure at all, which is what the books say:
+// the sale is still owed what it was owed, and what the shop owes back sits on
+// its own bill.
 function buildCoreCalcState(dataset = data) {
   const customerPaidByCredit = {};
   const supplierPaidByCredit = {};
-  const customerRefundByCredit = {};
   (dataset.payments || []).forEach(p => {
     const key = String(p.creditId);
     customerPaidByCredit[key] = round2((customerPaidByCredit[key] || 0) + (Number(p.amount) || 0));
@@ -12287,27 +12301,9 @@ function buildCoreCalcState(dataset = data) {
     const key = String(p.scId);
     supplierPaidByCredit[key] = round2((supplierPaidByCredit[key] || 0) + (Number(p.amount) || 0));
   });
-  const saleTxToCredit = {};
-  (dataset.credits || []).forEach(c => {
-    if(Array.isArray(c.txIds) && c.txIds.length) {
-      c.txIds.forEach(id => { saleTxToCredit[String(id)] = String(c.id); });
-    } else if(c.txId !== undefined && c.txId !== null && String(c.txId) !== '') {
-      saleTxToCredit[String(c.txId)] = String(c.id);
-    }
-  });
-  (dataset.transactions || []).forEach(t => {
-    if(!(t && t.type === 'return' && (t.returnType === 'sale-return' || !t.returnType))) return;
-    const linkedKey = String(t.linkedTxId || '');
-    if(!linkedKey) return;
-    const creditId = saleTxToCredit[linkedKey];
-    if(!creditId) return;
-    const refund = Number(t.cashPaid !== undefined ? t.cashPaid : t.total) || 0;
-    customerRefundByCredit[String(creditId)] = round2((customerRefundByCredit[String(creditId)] || 0) + refund);
-  });
   return {
     customerPaidByCredit,
-    supplierPaidByCredit,
-    customerRefundByCredit
+    supplierPaidByCredit
   };
 }
 
@@ -12355,10 +12351,9 @@ function getCreditDue(credit) {
   }
   const core = getCoreCalcState(data);
   const extraPaid = Number(core.customerPaidByCredit[String(credit.id)] || 0);
-  const refunded = Number(core.customerRefundByCredit[String(credit.id)] || 0);
   // Net in integer paisa: independently-rounded taka components can leave a
   // sub-paisa ghost (a settled due showing 0.004); paisa makes settled exactly 0.
-  const dueP = toPaisa(credit.total) - toPaisa(credit.paid) - toPaisa(extraPaid) + toPaisa(refunded);
+  const dueP = toPaisa(credit.total) - toPaisa(credit.paid) - toPaisa(extraPaid);
   const out = Math.max(0, fromPaisa(dueP));
   return memoCurrentDue(key, out);
 }
@@ -12368,8 +12363,9 @@ function getCreditTotalPaid(credit) {
   if(__currentDueCache.has(key)) return __currentDueCache.get(key);
   const core = getCoreCalcState(data);
   const extraPaid = Number(core.customerPaidByCredit[String(credit.id)] || 0);
-  const refunded = Number(core.customerRefundByCredit[String(credit.id)] || 0);
-  const out = round2(Math.max(0, (Number(credit.paid) || 0) + extraPaid - refunded));
+  // What the customer paid ON THIS BILL. A refund on a return is money moving
+  // on the return's own document, not a reversal of this payment.
+  const out = round2(Math.max(0, (Number(credit.paid) || 0) + extraPaid));
   return memoCurrentDue(key, out);
 }
 
@@ -12400,7 +12396,6 @@ function getAsOfDueState(cutoffYmd) {
   if(cached) return cached;
   const customerPaidByCreditP = {};
   const supplierPaidByCreditP = {};
-  const customerRefundByCreditP = {};
   (data.payments || []).forEach(p => {
     if(!isOnOrBeforeYmd(p.date, cutoff)) return;
     const key = String(p.creditId);
@@ -12424,23 +12419,7 @@ function getAsOfDueState(cutoffYmd) {
     if(!key || key === 'undefined') return;
     supplierPaidByCreditP[key] = (supplierPaidByCreditP[key] || 0) + toPaisa(p.amount);
   });
-  const saleTxToCredit = {};
-  (data.credits || []).forEach(c => {
-    const creditId = String(c.id);
-    if(Array.isArray(c.txIds) && c.txIds.length) {
-      c.txIds.forEach(id => { saleTxToCredit[String(id)] = creditId; });
-    } else if(c.txId !== undefined && c.txId !== null && String(c.txId) !== '') {
-      saleTxToCredit[String(c.txId)] = creditId;
-    }
-  });
-  (data.transactions || []).forEach(t => {
-    if(!(t && t.type === 'return' && (t.returnType === 'sale-return' || !t.returnType))) return;
-    if(!isOnOrBeforeYmd(t.date, cutoff)) return;
-    const creditId = saleTxToCredit[String(t.linkedTxId || '')];
-    if(!creditId) return;
-    customerRefundByCreditP[creditId] = (customerRefundByCreditP[creditId] || 0) + toPaisa(t.cashPaid !== undefined ? t.cashPaid : t.total);
-  });
-  const state = { customerPaidByCreditP, supplierPaidByCreditP, customerRefundByCreditP };
+  const state = { customerPaidByCreditP, supplierPaidByCreditP };
   __asOfDueCache.set(cacheKey, state);
   if(__asOfDueCache.size > 20) {
     __asOfDueCache.delete(__asOfDueCache.keys().next().value);
@@ -12453,8 +12432,7 @@ function getCreditDueAsOf(credit, cutoffYmd) {
   // Sum and net in integer paisa so an "as of" settled due is exactly 0.
   const asOf = getAsOfDueState(cutoffYmd);
   const extraPaidAsOfP = Number(asOf.customerPaidByCreditP[creditId] || 0);
-  const refundedAsOfP = Number(asOf.customerRefundByCreditP[creditId] || 0);
-  return Math.max(0, fromPaisa(toPaisa(credit.total) - toPaisa(credit.paid) - extraPaidAsOfP + refundedAsOfP));
+  return Math.max(0, fromPaisa(toPaisa(credit.total) - toPaisa(credit.paid) - extraPaidAsOfP));
 }
 function getSupplierDueAsOf(sc, cutoffYmd) {
   if(!sc || !isOnOrBeforeYmd(sc.date, cutoffYmd)) return 0;
